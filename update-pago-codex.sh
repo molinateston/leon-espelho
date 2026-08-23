@@ -642,6 +642,29 @@ finally: os.close(dirfd)
 PY
 }
 
+# BAIXA COM ESPELHO (23/08, lei do dono: "o LEON deles deveria atualizar independente").
+# A central do dono era ponto unico de falha: VPS fora = frota inteira sem atualizar,
+# inclusive quem paga. Agora: tenta a central; se ela nao responde, cai pro espelho
+# publico no GitHub. A SEGURANCA NAO MUDA: todo artefato e conferido por sha256 e pelo
+# manifesto assinado depois do download, venha de onde vier. O que exige licenca (a base
+# do produto) continua SO na central: o espelho serve apenas o que ja e livre.
+LEON_ESPELHO="${LEON_ESPELHO:-https://raw.githubusercontent.com/molinateston/leon-espelho/main}"
+baixa_com_espelho() {  # baixa_com_espelho <caminho-na-central> <destino> <max-bytes>
+  local rel="$1" dest="$2" max="$3"
+  if curl -fsSL --max-filesize "$max" --retry 2 --retry-delay 2 --retry-connrefused \
+      --max-time 180 "$CENTRAL$rel" -o "$dest" 2>/dev/null; then
+    return 0
+  fi
+  # central fora: o espelho publico assume. O nome do arquivo e o mesmo dos dois lados.
+  local nome="${rel##*/}"
+  if [ -n "$nome" ] && curl -fsSL --max-filesize "$max" --retry 2 --retry-delay 2 \
+      --max-time 180 "$LEON_ESPELHO/$nome" -o "$dest" 2>/dev/null; then
+    say "   (a central nao respondeu; peguei do espelho publico)"
+    return 0
+  fi
+  return 1
+}
+
 run_candidate_model_smoke() {
   local live="$1" tx="$2" status=0
   [ "$TEST_MODE" != "1" ] || return 0
@@ -1783,8 +1806,9 @@ write_codex_config_candidate "$TX_DIR/config.candidate" \
 # O bridge v2 depende do adapter e do shim da mesma versão. Baixamos um bundle
 # indivisível, validamos hash, lista exata e sintaxe, e só então sobrepomos o stage.
 BUNDLE_TMP="$(mktemp "${TMPDIR:-/tmp}/leon-codex-v2.XXXXXX.tar.gz")"
-if ! curl_common -fsSL --max-filesize "$bundle_bytes" --retry 3 --retry-delay 2 --retry-connrefused \
-    "$CENTRAL$bundle_url" -o "$BUNDLE_TMP"; then
+# o cap de transporte (--max-filesize) e aplicado dentro de baixa_com_espelho, nos DOIS
+# caminhos (central e espelho), com o valor passado no terceiro argumento.
+if ! baixa_com_espelho "$bundle_url" "$BUNDLE_TMP" "$bundle_bytes"; then
   fatal "não consegui baixar o runtime Codex v2 completo."
 fi
 verify_signed_artifact "$BUNDLE_TMP" "$bundle_sha256" "$bundle_bytes" "runtime Codex v2"
@@ -1861,8 +1885,9 @@ BUNDLE_TMP=""
 # Catálogo mínimo Codex: somente o artefato coberto pelo manifesto assinado.
 # Não existe clone, overlay nem reaproveitamento de scripts do catálogo antigo.
 SKILLS_TMP="$(mktemp "${TMPDIR:-/tmp}/leon-skills.XXXXXX.tar.gz")"
-if ! curl_common -fsSL --max-filesize "$skills_bytes" --retry 3 --retry-delay 2 --retry-connrefused \
-    "$CENTRAL$skills_url" -o "$SKILLS_TMP"; then
+# o cap de transporte (--max-filesize) e aplicado dentro de baixa_com_espelho, nos DOIS
+# caminhos (central e espelho), com o valor passado no terceiro argumento.
+if ! baixa_com_espelho "$skills_url" "$SKILLS_TMP" "$skills_bytes"; then
   fatal "não consegui baixar o catálogo Codex assinado."
 fi
 verify_signed_artifact "$SKILLS_TMP" "$skills_sha256" "$skills_bytes" "catálogo de skills"
@@ -1891,8 +1916,9 @@ rm -f -- "$SKILLS_TMP"
 SKILLS_TMP=""
 
 UPDATE_TMP="$(mktemp "${TMPDIR:-/tmp}/leon-updater.XXXXXX.sh")"
-if ! curl_common -fsSL --max-filesize "$updater_bytes" --retry 3 --retry-delay 2 --retry-connrefused \
-    "$CENTRAL$updater_url" -o "$UPDATE_TMP"; then
+# o cap de transporte (--max-filesize) e aplicado dentro de baixa_com_espelho, nos DOIS
+# caminhos (central e espelho), com o valor passado no terceiro argumento.
+if ! baixa_com_espelho "$updater_url" "$UPDATE_TMP" "$updater_bytes"; then
   fatal "não consegui baixar o atualizador candidato assinado."
 fi
 verify_signed_artifact "$UPDATE_TMP" "$updater_sha256" "$updater_bytes" "atualizador candidato"
