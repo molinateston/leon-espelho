@@ -89,10 +89,30 @@ fi
 le_do_env() { [ -n "$ENV_ANTIGO" ] && sed -n "s/^$1=//p" "$ENV_ANTIGO" 2>/dev/null | head -1 | tr -d '"' ; }
 
 # a chave da licenca no .env do cliente e LEON_LICENSE_EMAIL (medido em instalacao real)
+# COMANDO PRE-PREENCHIDO (24/08, lei do dono: "ele tem que responder perguntas no
+# instalador... nao rola um comando unico?"): a pagina gera o comando com as respostas
+# JA DENTRO, por variavel de ambiente. Aqui elas VENCEM o estado de tentativa anterior.
+# Validacao continua a mesma logo abaixo: valor invalido cai na pergunta normal.
+_ENV_EMAIL="${EMAIL:-}"; _ENV_NOME="${NOME:-}"; _ENV_GENDER="${GENDER:-}"
+_ENV_TOKEN="${TOKEN:-${BOT_TOKEN:-}}"; _ENV_ENGINE="${ENGINE:-${LEON_ENGINE:-}}"
 EMAIL="$(le_do_env LEON_LICENSE_EMAIL)"; [ -n "$EMAIL" ] || EMAIL="$(le_do_env EMAIL)"; [ -n "$EMAIL" ] || EMAIL="$(le_do_env LICENSE_EMAIL)"
 NOME="$(le_do_env AGENT_NAME)"
 TOKEN="$(le_do_env TELEGRAM_BOT_TOKEN)"; [ -n "$TOKEN" ] || TOKEN="$(le_do_env BOT_TOKEN)"
 GENDER="$(le_do_env AGENT_GENDER)"
+# ambiente vence o estado, MAS passa pela MESMA regua das perguntas: valor invalido
+# vira vazio e cai na pergunta normal (nunca entra lixo calado).
+[ -n "$_ENV_EMAIL" ] && { printf '%s' "$_ENV_EMAIL" | LC_ALL=C grep -qE '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$' && EMAIL="$_ENV_EMAIL" || _ENV_EMAIL=""; }
+[ -n "$_ENV_NOME" ] && { printf '%s' "$_ENV_NOME" | LC_ALL=C grep -qE '^[^/\\<>|;&$`"'"'"'*?]{1,40}$' && NOME="$_ENV_NOME" || _ENV_NOME=""; }
+case "$_ENV_GENDER" in male|female) GENDER="$_ENV_GENDER" ;; *) _ENV_GENDER="" ;; esac
+if [ -n "$_ENV_TOKEN" ]; then
+  if printf '%s' "$_ENV_TOKEN" | LC_ALL=C grep -qE '^[0-9]{6,}:[A-Za-z0-9_-]{20,}$' \
+     && curl -fsS --max-time 20 "https://api.telegram.org/bot$_ENV_TOKEN/getMe" </dev/null 2>/dev/null | grep -q '"ok":true'; then
+    TOKEN="$_ENV_TOKEN"
+  else
+    amarelo "  o token que veio no comando não passou na conferência do Telegram; vou perguntar."
+    TOKEN=""
+  fi
+fi
 DONO="$(le_do_env OWNER_CHAT_ID)"
 
 titulo "1 de 4 · E-mail da compra"
@@ -133,8 +153,12 @@ fi
 
 titulo "Motor de inteligência"
 echo "1 = Codex (assinatura do ChatGPT)   2 = Claude (assinatura da Anthropic)"
-pergunta "Digite 1 ou 2" _M '^[12]$' "Digite só 1 ou 2." "1"
-[ "$_M" = "2" ] && ENGINE="claude" || ENGINE="codex"
+case "$_ENV_ENGINE" in
+  claude|codex) ENGINE="$_ENV_ENGINE"; verde "  já tenho: $ENGINE" ;;
+  *)
+    pergunta "Digite 1 ou 2" _M '^[12]$' "Digite só 1 ou 2." "1"
+    [ "$_M" = "2" ] && ENGINE="claude" || ENGINE="codex" ;;
+esac
 
 titulo "Tudo certo, começando"
 echo "  e-mail: $EMAIL"
