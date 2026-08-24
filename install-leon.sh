@@ -974,6 +974,26 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
   systemctl enable --now cron >/dev/null 2>&1 || true
   locale-gen C.UTF-8 2>/dev/null || true
 
+  # POSTGRES (24/08, lei do dono: "o cliente precisa ter o meu LEON com todas as
+  # habilidades"): o LEON do dono espelha o estado num banco `leon` e algumas skills
+  # consultam banco. A casa do cliente nasce com o mesmo. BEST-EFFORT declarado:
+  # se o apt do postgres falhar, a instalacao SEGUE (o agente e 100% funcional por
+  # arquivos; o banco e espelho, nunca dependencia). O updater roda SEM root e nao
+  # instala postgres: casa sem banco liga depois com um sudo apt do dono.
+  echo ">> instalando o banco de dados (Postgres)..."
+  if "${APT_INSTALL[@]}" postgresql postgresql-contrib >/dev/null 2>/tmp/apt-pg.err; then
+    systemctl enable --now postgresql >/dev/null 2>&1 || true
+    # extensao de embedding: opcional (nem todo Ubuntu tem o pacote; sem ela o banco vive igual)
+    "${APT_INSTALL[@]}" postgresql-16-pgvector >/dev/null 2>&1 || true
+  else
+    echo "   (aviso) postgres nao instalou agora; o agente funciona igual. Pra ligar o banco depois: sudo apt install postgresql (o proximo update completa)."
+  fi
+  # papel + banco do usuario de servico (idempotente; falha nao derruba nada)
+  if command -v psql >/dev/null 2>&1; then
+    sudo -u postgres psql -tAc "select 1 from pg_roles where rolname='$LEON_USER'" 2>/dev/null | grep -q 1       || sudo -u postgres createuser "$LEON_USER" 2>/dev/null || true
+    sudo -u postgres psql -lqt 2>/dev/null | cut -d"|" -f1 | grep -qw leon       || sudo -u postgres createdb -O "$LEON_USER" leon 2>/dev/null || true
+  fi
+
   # Node do sistema: decidido por /usr/bin/node, NUNCA por "command -v node".
   # O root com nvm de outra IA tinha node no PATH dele, a checagem passava, e o
   # usuario leon ficava sem node nenhum. Abaixo de 20 (ou ausente): NodeSource 22.
@@ -1610,6 +1630,23 @@ PY
   # 5h, horario de Brasilia, sorteada por maquina) e nao fala nada de noite.
   agendar_rede "$INSTALL_DIR/scripts/update-auto.sh"    "13 * * * *"
   agendar_rede "$INSTALL_DIR/scripts/aviso-manha.sh"    "21 * * * *"
+  # 24/08: o BACKUP nunca era agendado (casa real auditada: zero backup em disco).
+  # Memoria/persona do cliente sem copia = perda total se a VPS morrer.
+  agendar_rede "$INSTALL_DIR/scripts/backup-diario.sh"  "40 3 * * *"
+  # Banco Postgres `leon` (mesma estrutura do dono): garante agora e importa o
+  # estado dos .md 1x/dia. Tolerante a falha: sem postgres, tudo segue igual.
+  [ -x "$INSTALL_DIR/scripts/garante-banco.sh" ] && bash "$INSTALL_DIR/scripts/garante-banco.sh" || true
+  if [ -f "$INSTALL_DIR/workers/importa-estado-pro-banco.cjs" ]; then
+    agendar_rede_node(){ local alvo="$1" quando="$2" cur
+      [ -f "$alvo" ] || return 0; command -v crontab >/dev/null 2>&1 || return 0
+      cur="$(crontab -l 2>/dev/null || true)"
+      printf %s "$cur" | grep -qF "$alvo" && return 0
+      { [ -n "$cur" ] && printf '%s
+' "$cur"; printf '%s /usr/bin/node %s >/dev/null 2>&1
+' "$quando" "$alvo"; }         | crontab - 2>/dev/null || true
+    }
+    agendar_rede_node "$INSTALL_DIR/workers/importa-estado-pro-banco.cjs" "50 3 * * *"
+  fi
 
   # ------------------------------------------------------------
   # 2.3b Skills do metodo Soft. Repo TRANCADO (so leitura); a chave

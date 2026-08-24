@@ -2093,6 +2093,34 @@ if [ "${LEON_TEST_FAIL_AT:-}" = "after_commit" ]; then
   fatal "falha injetada depois do commit do runtime."
 fi
 
+# ---- HABILIDADES COMPLETAS NA CASA (24/08, lei do dono) --------------------
+# 2) BACKUP AGENDADO: casa auditada tinha ZERO backup (nunca foi agendado).
+_cron_add(){ local linha="$1" chave="$2" cur; command -v crontab >/dev/null 2>&1 || return 0
+  # a chave de dedup vem EXPLICITA (caminho do script): extrair por campo ja errou duas
+  # vezes (ultimo token = "2>&1" casava sempre; campo 6 da linha de node = /usr/bin/node).
+  [ -n "$chave" ] || return 0
+  cur="$(crontab -l 2>/dev/null || true)"
+  printf %s "$cur" | grep -qF "$chave " >/dev/null 2>&1 && return 0
+  printf %s "$cur" | grep -qF "${chave}\"" >/dev/null 2>&1 && return 0
+  printf %s "$cur" | grep -qE "$(printf %s "$chave" | sed 's/[].[^$*\\/]/\\&/g')( |$|>)" && return 0
+  { [ -n "$cur" ] && printf '%s\n' "$cur"; printf '%s\n' "$linha"; } | crontab - 2>/dev/null || true; }
+[ -f "$INSTALL_DIR/scripts/backup-diario.sh" ] && _cron_add "40 3 * * * $INSTALL_DIR/scripts/backup-diario.sh >/dev/null 2>&1" "$INSTALL_DIR/scripts/backup-diario.sh"
+# 3) BANCO POSTGRES (mesma estrutura do dono; espelho, nunca dependencia):
+[ -x "$INSTALL_DIR/scripts/garante-banco.sh" ] && bash "$INSTALL_DIR/scripts/garante-banco.sh" 2>/dev/null | sed "s/^/  /" || true
+[ -f "$INSTALL_DIR/workers/importa-estado-pro-banco.cjs" ] && _cron_add "50 3 * * * /usr/bin/node $INSTALL_DIR/workers/importa-estado-pro-banco.cjs >/dev/null 2>&1" "$INSTALL_DIR/workers/importa-estado-pro-banco.cjs"
+# modulo pg pro importador (best-effort, uma vez)
+# node resolve modulo subindo da pasta do SCRIPT (workers/): pg mora na RAIZ da casa (bancada pegou)
+if [ ! -d "$INSTALL_DIR/node_modules/pg" ]; then
+  ( cd "$INSTALL_DIR" && timeout 120 npm install -q --no-save pg >/dev/null 2>&1 ) || true
+fi
+
+# 4) REPORTA A VERSAO pra central (24/08): a rota /versao-report existia e NINGUEM
+# chamava — versao_atual vazia nas 32 licencas, dono cego sobre quem esta em qual
+# versao. Best-effort: falha de rede nao atrapalha o update.
+curl -fsS --max-time 15 -X POST "$CENTRAL/versao-report" \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$EMAIL\",\"versao\":\"$version\"}" >/dev/null 2>&1 || true
+
 say "commit atomico concluido; reiniciando $SERVICE"
 if [ "$TEST_MODE" = "1" ]; then
   service_write restart "$SERVICE"
