@@ -2105,6 +2105,16 @@ _cron_add(){ local linha="$1" chave="$2" cur; command -v crontab >/dev/null 2>&1
   printf %s "$cur" | grep -qE "$(printf %s "$chave" | sed 's/[].[^$*\\/]/\\&/g')( |$|>)" && return 0
   { [ -n "$cur" ] && printf '%s\n' "$cur"; printf '%s\n' "$linha"; } | crontab - 2>/dev/null || true; }
 [ -f "$INSTALL_DIR/scripts/backup-diario.sh" ] && _cron_add "40 3 * * * $INSTALL_DIR/scripts/backup-diario.sh >/dev/null 2>&1" "$INSTALL_DIR/scripts/backup-diario.sh"
+# 3b) MODELO DE AUDIO NATIVO (25/08, caso Leticia): casa instalada antes do fix
+# nao tem o modelo whisper — o 1o audio do cliente dispara download de 464MB DENTRO
+# do bridge rodando (pico ~580MB de RAM = perfil de OOM em VPS pequena). Baixa AGORA,
+# fora do bridge, com teto de tempo. Idempotente: cache pronto = sai na hora.
+if [ -x "$HOME/.leon/whisper-venv/bin/python3" ]; then
+  timeout 600 "$HOME/.leon/whisper-venv/bin/python3" - <<'PYMODEL' >/dev/null 2>&1 && say "   modelo de audio pronto (transcricao nativa)." || true
+from faster_whisper import WhisperModel
+WhisperModel("small", device="cpu", compute_type="int8")
+PYMODEL
+fi
 # 3) BANCO POSTGRES (mesma estrutura do dono; espelho, nunca dependencia):
 [ -x "$INSTALL_DIR/scripts/garante-banco.sh" ] && bash "$INSTALL_DIR/scripts/garante-banco.sh" 2>/dev/null | sed "s/^/  /" || true
 [ -f "$INSTALL_DIR/workers/importa-estado-pro-banco.cjs" ] && _cron_add "50 3 * * * /usr/bin/node $INSTALL_DIR/workers/importa-estado-pro-banco.cjs >/dev/null 2>&1" "$INSTALL_DIR/workers/importa-estado-pro-banco.cjs"

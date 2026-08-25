@@ -1120,6 +1120,16 @@ if [ ! -x ~/.leon/whisper-venv/bin/python3 ] || ! ~/.leon/whisper-venv/bin/pytho
   ~/.leon/whisper-venv/bin/pip install --quiet --upgrade pip >/dev/null
   ~/.leon/whisper-venv/bin/pip install --quiet faster-whisper >/dev/null
 fi
+# 25/08 (lei do dono: "transcricao TEM que ser nativa"): o modelo baixa AGORA, na
+# instalacao — nao no primeiro audio do cliente. Sem isto, o primeiro audio dele
+# virava "roda /audio e espera uns minutos": vergonha na frente de cliente novo.
+# Baixa 'small' (o mesmo do voice-handler); ~460MB, uma vez so. Falha nao derruba
+# a instalacao (sem rede pro hub = o updater baixa no proximo ciclo).
+timeout 600 ~/.leon/whisper-venv/bin/python3 - <<'PYMODEL' || echo "   (aviso) modelo de audio nao baixou agora; o proximo update completa"
+from faster_whisper import WhisperModel
+WhisperModel("small", device="cpu", compute_type="int8")
+print("   modelo de audio pronto (transcricao nativa de fabrica)")
+PYMODEL
 WHISPER_SETUP
 
   # O atualizador do Codex le TOML em python; Ubuntu 22.04 tem Python 3.10, sem
