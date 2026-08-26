@@ -1925,6 +1925,10 @@ glob_scan_max_depth = 4
 ":root" = "deny"
 ":minimal" = "read"
 "$LEON_DATA_DIR/codex-cli" = "read"
+# 26/08: rede ligada exige DNS — sem estes dois em leitura, o resolv morre e a rede "ligada"
+# continua inútil (medido na auditoria: TCP pra IP direto passa, nome de domínio falha).
+"/etc/resolv.conf" = "read"
+"/etc/hosts" = "read"
 "$LEON_SKILLS_DIR" = "read"
 "$LEON_WORK_AREA" = "write"
 "$LEON_DATA_DIR/brain" = "write"
@@ -1940,7 +1944,15 @@ glob_scan_max_depth = 4
 "keys/**" = "deny"
 
 [permissions.leon.network]
-enabled = false
+# 26/08 (lei do dono): Vercel, Zernio e afins são APIs BÁSICAS DO USO — o agente precisa de
+# rede pros comandos dele (curl, CLIs de deploy). O cofre de credenciais só faz sentido com
+# isto ligado. Raiz negada e filtros de env seguem valendo.
+enabled = true
+
+# Knob OFICIAL do Codex: sandbox workspace-write bloqueia rede por padrão; sem esta seção,
+# o enabled acima não basta.
+[sandbox_workspace_write]
+network_access = true
 
 [shell_environment_policy]
 inherit = "core"

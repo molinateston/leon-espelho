@@ -1013,6 +1013,10 @@ glob_scan_max_depth = 4
 ":root" = "deny"
 ":minimal" = "read"
 "$LEON_DATA_DIR/codex-cli" = "read"
+# 26/08: rede ligada exige DNS — sem estes dois em leitura, o resolv morre e a rede "ligada"
+# continua inútil (medido na auditoria: TCP pra IP direto passa, nome de domínio falha).
+"/etc/resolv.conf" = "read"
+"/etc/hosts" = "read"
 "$LEON_SKILLS_DIR" = "read"
 "$LEON_WORK_AREA" = "write"
 "$LEON_DATA_DIR/brain" = "write"
@@ -1028,7 +1032,15 @@ glob_scan_max_depth = 4
 "keys/**" = "deny"
 
 [permissions.leon.network]
-enabled = false
+# 26/08 (lei do dono): Vercel, Zernio e afins são APIs BÁSICAS DO USO — o agente precisa de
+# rede pros comandos dele (curl, CLIs de deploy). O cofre de credenciais só faz sentido com
+# isto ligado. Raiz negada e filtros de env seguem valendo.
+enabled = true
+
+# Knob OFICIAL do Codex: sandbox workspace-write bloqueia rede por padrão; sem esta seção,
+# o enabled acima não basta.
+[sandbox_workspace_write]
+network_access = true
 
 [shell_environment_policy]
 inherit = "core"
@@ -1041,6 +1053,18 @@ ignore_default_excludes = false
 "*API_KEY*" = "exclude"
 "BOT_TOKEN" = "exclude"
 EOF
+  # Preserva a conexão Meta (meta-connect): se o dono já conectou, o bloco MCP re-entra no
+  # candidate. Sem isto, TODO update regenerava o config.toml do template e desconectava o
+  # Meta em silêncio (achado da auditoria 26/08). O token NÃO entra aqui: só a referência
+  # por variável de ambiente, que o bridge injeta no spawn do app-server.
+  if [ -f "$INSTALL_DIR/.meta-token.json" ]; then
+    cat >> "$destination" <<'METAEOF'
+
+[mcp_servers.meta-ads]
+url = "https://mcp.facebook.com/ads"
+bearer_token_env_var = "META_MCP_TOKEN"
+METAEOF
+  fi
   chmod 0600 "$destination"
   "$PYTHON_BIN" - "$destination" <<'PY'
 import sys
@@ -1053,7 +1077,12 @@ profile=data.get("permissions",{}).get("leon",{})
 filesystem=profile.get("filesystem",{})
 if data.get("approval_policy")!="never" or data.get("default_permissions")!="leon": raise SystemExit(1)
 if filesystem.get(":root")!="deny" or filesystem.get(":minimal")!="read": raise SystemExit(1)
-if "sandbox_mode" in data or "sandbox_workspace_write" in data: raise SystemExit(1)
+if "sandbox_mode" in data: raise SystemExit(1)
+# 26/08 (lei do dono: APIs basicas do uso): rede LIGADA e permitida — mas SO ela.
+# sandbox_workspace_write aceito com exatamente {"network_access": true}; qualquer outra
+# chave nessa secao (writable_roots etc.) continua proibida — rede nao afrouxa filesystem.
+sww=data.get("sandbox_workspace_write")
+if sww is not None and sww!={"network_access": True}: raise SystemExit(1)
 PY
 }
 
