@@ -1885,7 +1885,6 @@ required = {
     "appserver/index.cjs",
     "appserver/package.json",
     "lib/onboarding.js",
-    "lib/meta-connect.js",
     "lib-motores/codex-appserver.cjs",
     "smoke/appserver-smoke.cjs",
     "workers/piper.js",
@@ -1927,7 +1926,7 @@ if d.get("schema")!=1 or d.get("kind")!="leon-codex-capabilities": raise SystemE
 if d.get("attachments",{}).get("curatedOfficePreconversion") is not False: raise SystemExit(1)
 if d.get("optionalNotProvisionedByCore",{}).get("googleWorkspace") is not False: raise SystemExit(1)
 PY
-for runtime_js in bridge.cjs appserver/adapter.cjs lib/onboarding.js lib/meta-connect.js lib-motores/codex-appserver.cjs smoke/appserver-smoke.cjs workers/piper.js; do
+for runtime_js in bridge.cjs appserver/adapter.cjs lib/onboarding.js lib-motores/codex-appserver.cjs smoke/appserver-smoke.cjs workers/piper.js; do
   "$NODE_BIN" --check "$BUNDLE_EXTRACT/$runtime_js" >/dev/null 2>&1 \
     || fatal "o runtime Codex v2 contém JavaScript inválido: $runtime_js."
 done

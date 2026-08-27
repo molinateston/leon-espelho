@@ -1455,7 +1455,6 @@ allowed_files = {
     "appserver/index.cjs",
     "appserver/package.json",
     "lib/onboarding.js",
-    "lib/meta-connect.js",
     "lib-motores/codex-appserver.cjs",
     "smoke/appserver-smoke.cjs",
     "workers/piper.js",
