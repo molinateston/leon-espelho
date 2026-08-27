@@ -616,7 +616,7 @@ write_runtime_files_manifest() {
   : > "$destination"
   for rel in bridge.cjs capabilities.json \
     appserver/adapter.cjs appserver/index.cjs \
-    lib-motores/codex-appserver.cjs lib/onboarding.js lib/license.js \
+    lib-motores/codex-appserver.cjs lib/onboarding.js lib/meta-connect.js lib/license.js \
     workers/piper.js workers/edge-tts.js workers/hostinger-health.cjs; do
     [ -f "$stage/$rel" ] && [ ! -L "$stage/$rel" ] || continue
     printf '%s  %s\n' "$(sha256sum "$stage/$rel" | awk '{print $1}')" "$rel" >> "$destination"
@@ -1455,6 +1455,7 @@ allowed_files = {
     "appserver/index.cjs",
     "appserver/package.json",
     "lib/onboarding.js",
+    "lib/meta-connect.js",
     "lib-motores/codex-appserver.cjs",
     "smoke/appserver-smoke.cjs",
     "workers/piper.js",
@@ -1955,7 +1956,7 @@ enabled = true
 network_access = true
 
 [features]
-multi_agent_v2 = true
+multi_agent_v2 = false
 
 [agents]
 enabled = true

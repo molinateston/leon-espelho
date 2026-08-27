@@ -140,7 +140,7 @@ write_runtime_files_manifest() {
   : > "$destination"
   for rel in bridge.cjs capabilities.json \
     appserver/adapter.cjs appserver/index.cjs \
-    lib-motores/codex-appserver.cjs lib/onboarding.js lib/license.js \
+    lib-motores/codex-appserver.cjs lib/onboarding.js lib/meta-connect.js lib/license.js \
     workers/piper.js workers/edge-tts.js workers/hostinger-health.cjs; do
     [ -f "$stage/$rel" ] && [ ! -L "$stage/$rel" ] || continue
     printf '%s  %s\n' "$(sha256sum "$stage/$rel" | awk '{print $1}')" "$rel" >> "$destination"
@@ -1043,7 +1043,7 @@ enabled = true
 network_access = true
 
 [features]
-multi_agent_v2 = true
+multi_agent_v2 = false
 
 [agents]
 enabled = true
@@ -1885,6 +1885,7 @@ required = {
     "appserver/index.cjs",
     "appserver/package.json",
     "lib/onboarding.js",
+    "lib/meta-connect.js",
     "lib-motores/codex-appserver.cjs",
     "smoke/appserver-smoke.cjs",
     "workers/piper.js",
@@ -1926,7 +1927,7 @@ if d.get("schema")!=1 or d.get("kind")!="leon-codex-capabilities": raise SystemE
 if d.get("attachments",{}).get("curatedOfficePreconversion") is not False: raise SystemExit(1)
 if d.get("optionalNotProvisionedByCore",{}).get("googleWorkspace") is not False: raise SystemExit(1)
 PY
-for runtime_js in bridge.cjs appserver/adapter.cjs lib/onboarding.js lib-motores/codex-appserver.cjs smoke/appserver-smoke.cjs workers/piper.js; do
+for runtime_js in bridge.cjs appserver/adapter.cjs lib/onboarding.js lib/meta-connect.js lib-motores/codex-appserver.cjs smoke/appserver-smoke.cjs workers/piper.js; do
   "$NODE_BIN" --check "$BUNDLE_EXTRACT/$runtime_js" >/dev/null 2>&1 \
     || fatal "o runtime Codex v2 contém JavaScript inválido: $runtime_js."
 done
