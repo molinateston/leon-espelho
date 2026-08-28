@@ -140,7 +140,7 @@ write_runtime_files_manifest() {
   : > "$destination"
   for rel in bridge.cjs capabilities.json \
     appserver/adapter.cjs appserver/index.cjs \
-    lib-motores/codex-appserver.cjs lib/onboarding.js lib/meta-connect.js lib/license.js \
+    lib-motores/codex-appserver.cjs lib/onboarding.js lib/meta-connect.js lib/meta-graph.js lib/license.js \
     workers/piper.js workers/edge-tts.js workers/hostinger-health.cjs; do
     [ -f "$stage/$rel" ] && [ ! -L "$stage/$rel" ] || continue
     printf '%s  %s\n' "$(sha256sum "$stage/$rel" | awk '{print $1}')" "$rel" >> "$destination"
@@ -481,7 +481,13 @@ for rel in paths:
  raw=open(full,"rb").read(); digest=hashlib.sha256(raw).hexdigest(); mode=f"{stat.S_IMODE(si.st_mode):04o}"
  if len(raw)!=item["bytes"] or digest!=item["sha256"] or mode!=item["mode"]: raise SystemExit(1)
  low=raw.lower()
- if (b"open"+b"claw") in low or (b"cl"+b"aude") in low or b"bypasspermissions" in low or b"-----begin private key-----" in low: raise SystemExit(1)
+ # Frente D: o catálogo curado cita "Claude"/"Codex" legitimamente (é o motor do produto),
+ # então o veto ao literal "claude" saiu. O veto a "openclaw" (ferramenta interna do dono),
+ # a private key e a bypasspermissions CONTINUA — o catálogo já é purgado de openclaw, então
+ # este veto é defesa em profundidade e não deve disparar.
+ if (b"open"+b"claw") in low or b"bypasspermissions" in low or b"-----begin private key-----" in low: raise SystemExit(1)
+ # veto por PREFIXO a caminho privado do dono que por acaso sobreviva à sanitização do builder
+ if b"/home/" in low or b"/root/" in low or b".openclaw" in low or b"leomolina" in low or b"leonardomolina" in low or b"raizonline" in low: raise SystemExit(1)
  lines.append(f"{digest}\t{len(raw)}\t{mode}\t{rel}\n".encode())
 fmt="sha256<TAB>bytes<TAB>mode4<TAB>path<LF>; payload files only; path bytewise ascending"
 if m["content_tree_format"]!=fmt or hashlib.sha256(b"".join(lines)).hexdigest()!=m["content_tree_sha256"]: raise SystemExit(1)
@@ -789,7 +795,7 @@ safe_copy_state_file() {
   "$PYTHON_BIN" - "$source" "$destination" "$kind" <<'PY'
 import json, os, re, stat, sys
 source,destination,kind=sys.argv[1:]
-limits={"env":256*1024,"sessions":16*1024*1024,"topics":2*1024*1024,"onboarding":64*1024}
+limits={"env":256*1024,"sessions":16*1024*1024,"topics":2*1024*1024,"onboarding":64*1024,"meta":64*1024}
 if kind not in limits: raise SystemExit(1)
 try:
     info=os.lstat(source)
@@ -1824,7 +1830,7 @@ if [ "$(basename "$PACKAGE_ROOT")" != "leon-base" ] \
   fatal "o manifesto interno do pacote-base curado não confere."
 fi
 
-for protected in .env sessions.json topics.json codex-mode.json cursor-mode.json promises missions brain extensoes persona; do
+for protected in .env sessions.json topics.json codex-mode.json cursor-mode.json .meta-token.json .meta-connect.json promises missions brain extensoes persona; do
   if [ -e "$PACKAGE_ROOT/$protected" ] || [ -L "$PACKAGE_ROOT/$protected" ]; then
     fatal "o pacote tentou substituir estado do usuário: $protected."
   fi
@@ -2047,6 +2053,17 @@ safe_copy_state_file "$INSTALL_DIR/.env" "$STAGE/.env" env \
   || fatal "sessions.json atual reprovou a migração segura."
 [ ! -e "$INSTALL_DIR/topics.json" ] || safe_copy_state_file "$INSTALL_DIR/topics.json" "$STAGE/topics.json" topics \
   || fatal "topics.json atual reprovou a migração segura."
+# META CONNECT (28/08): o token e o estado da conexão Meta moram em .meta-token.json /
+# .meta-connect.json no WORKDIR (0600). ANTES desta linha o update os deixava no backup e o
+# WORKDIR novo nascia sem token → getToken(WORKDIR) no boot retornava null, META_MCP_TOKEN
+# ficava vazio, e o agente dizia "a conexão do Meta não chegou até mim" mesmo com o Meta
+# conectado (bug de campo no Leon 99, e em toda a frota que conectou Meta e deu /atualiza).
+# O bloco [mcp_servers.meta-ads] já re-entra no config (write_codex_config_candidate); aqui
+# migramos o TOKEN físico pra ele não órfãozar.
+[ ! -e "$INSTALL_DIR/.meta-token.json" ] || safe_copy_state_file "$INSTALL_DIR/.meta-token.json" "$STAGE/.meta-token.json" meta \
+  || fatal ".meta-token.json atual reprovou a migração segura."
+[ ! -e "$INSTALL_DIR/.meta-connect.json" ] || safe_copy_state_file "$INSTALL_DIR/.meta-connect.json" "$STAGE/.meta-connect.json" meta \
+  || fatal ".meta-connect.json atual reprovou a migração segura."
 
 # ONBOARDING · guarda de instalação existente. Quem chega por AQUI já é cliente: o
 # update roda sobre uma casa que já existe. Sem esta semente, ligar a jornada de
