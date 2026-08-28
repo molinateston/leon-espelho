@@ -1962,29 +1962,29 @@ enabled = true
 max_concurrent_threads_per_session = 2
 default_subagent_reasoning_effort = "low"
 
-[agents."braco-conteudo"]
+[agents."braco_conteudo"]
 description = "Conteudo: carrossel, reel, stories, headline, calendario, post."
-config_file = "$INSTALL_DIR/.codex/agents/braco-conteudo.toml"
+config_file = "$INSTALL_DIR/.codex/agents/braco_conteudo.toml"
 nickname_candidates = ["conteudo"]
 
-[agents."braco-funil"]
+[agents."braco_funil"]
 description = "Funil: carta/VSL, landing, isca, webinario, lancamento, captura."
-config_file = "$INSTALL_DIR/.codex/agents/braco-funil.toml"
+config_file = "$INSTALL_DIR/.codex/agents/braco_funil.toml"
 nickname_candidates = ["funil"]
 
-[agents."braco-vendas"]
+[agents."braco_vendas"]
 description = "Vendas: script, objecao, fechamento, prospeccao, pipeline, pos-venda."
-config_file = "$INSTALL_DIR/.codex/agents/braco-vendas.toml"
+config_file = "$INSTALL_DIR/.codex/agents/braco_vendas.toml"
 nickname_candidates = ["vendas"]
 
-[agents."braco-financeiro"]
+[agents."braco_financeiro"]
 description = "Financeiro: contas, saldo, conciliacao, cobranca, relatorio."
-config_file = "$INSTALL_DIR/.codex/agents/braco-financeiro.toml"
+config_file = "$INSTALL_DIR/.codex/agents/braco_financeiro.toml"
 nickname_candidates = ["financeiro"]
 
-[agents."braco-advogado"]
+[agents."braco_advogado"]
 description = "Juridico: contrato, clausula, risco legal, LGPD, revisao de termo."
-config_file = "$INSTALL_DIR/.codex/agents/braco-advogado.toml"
+config_file = "$INSTALL_DIR/.codex/agents/braco_advogado.toml"
 nickname_candidates = ["advogado"]
 
 [shell_environment_policy]
