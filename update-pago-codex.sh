@@ -1853,7 +1853,7 @@ normalize_agent_base "$STAGE/AGENT-BASE.md" "$LEON_SKILLS_DIR"
 # moram na PERSONA, nao no runtime. O install-leon.sh move na instalacao; o updater
 # tem que fazer o mesmo, senao a casa atualizada fica com o nucleo velho na persona e o
 # novo parado no stage (bug pego na Babi: NUCLEO-LEON.md no ~/socio-ia, nao na persona).
-for _peca in NUCLEO-LEON.md _MOTOR-CLAUDE.md _MOTOR-CODEX.md CAMINHOS-CANONICOS.md; do
+for _peca in NUCLEO-LEON.md _MOTOR-CLAUDE.md _MOTOR-CODEX.md _REGRAS-DURAS.md CAMINHOS-CANONICOS.md; do
   if [ -f "$STAGE/$_peca" ]; then
     normalize_agent_base "$STAGE/$_peca" "$LEON_SKILLS_DIR" 2>/dev/null || true
     install -m 0600 "$STAGE/$_peca" "$LEON_DATA_DIR/persona/$_peca" 2>/dev/null || true
@@ -1891,6 +1891,10 @@ required = {
     "appserver/index.cjs",
     "appserver/package.json",
     "lib/onboarding.js",
+    "lib/inbound.js",
+    "lib/meta-connect.js",
+    "lib/meta-mcp-codex-filter.cjs",
+    "lib/meta-account-guard.cjs",
     "lib-motores/codex-appserver.cjs",
     "smoke/appserver-smoke.cjs",
     "workers/piper.js",
@@ -1932,7 +1936,7 @@ if d.get("schema")!=1 or d.get("kind")!="leon-codex-capabilities": raise SystemE
 if d.get("attachments",{}).get("curatedOfficePreconversion") is not False: raise SystemExit(1)
 if d.get("optionalNotProvisionedByCore",{}).get("googleWorkspace") is not False: raise SystemExit(1)
 PY
-for runtime_js in bridge.cjs appserver/adapter.cjs lib/onboarding.js lib-motores/codex-appserver.cjs smoke/appserver-smoke.cjs workers/piper.js; do
+for runtime_js in bridge.cjs appserver/adapter.cjs lib/onboarding.js lib/inbound.js lib/meta-connect.js lib/meta-mcp-codex-filter.cjs lib/meta-account-guard.cjs lib-motores/codex-appserver.cjs smoke/appserver-smoke.cjs workers/piper.js; do
   "$NODE_BIN" --check "$BUNDLE_EXTRACT/$runtime_js" >/dev/null 2>&1 \
     || fatal "o runtime Codex v2 contém JavaScript inválido: $runtime_js."
 done

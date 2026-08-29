@@ -1422,7 +1422,7 @@ PY
   # moram na persona, ao lado do que o bridge ja le. Placeholders resolvidos igual ao
   # AGENT-BASE, senao o agente le "@@LEON_TMPDIR@@" no lugar do caminho de verdade.
   mkdir -p "$PERSONA_DIR_LOCAL"
-  for _peca in NUCLEO-LEON.md _MOTOR-CLAUDE.md _MOTOR-CODEX.md; do
+  for _peca in NUCLEO-LEON.md _MOTOR-CLAUDE.md _MOTOR-CODEX.md _REGRAS-DURAS.md; do
     if [ -f "$INSTALL_DIR/$_peca" ]; then
       mv -f "$INSTALL_DIR/$_peca" "$PERSONA_DIR_LOCAL/$_peca"
       normalizar_agent_base "$PERSONA_DIR_LOCAL/$_peca"
@@ -1455,6 +1455,10 @@ allowed_files = {
     "appserver/index.cjs",
     "appserver/package.json",
     "lib/onboarding.js",
+    "lib/inbound.js",
+    "lib/meta-connect.js",
+    "lib/meta-mcp-codex-filter.cjs",
+    "lib/meta-account-guard.cjs",
     "lib-motores/codex-appserver.cjs",
     "smoke/appserver-smoke.cjs",
     "workers/piper.js",
