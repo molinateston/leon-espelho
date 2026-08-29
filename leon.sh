@@ -69,12 +69,21 @@ echo "Vou te perguntar 4 coisas e cuidar do resto. Leva alguns minutos."
 [ "$(id -u)" -eq 0 ] || morre "este comando roda como root. No Terminal do navegador da Hostinger você já entra como root: cole a linha lá."
 command -v curl >/dev/null 2>&1 || morre "o comando curl não existe nesta VPS (sistema fora do padrão)."
 
-# Sistema suportado, dito em português antes de gastar o tempo do dono
+# Sistema: o LEON foi testado em Ubuntu 22.04 e 24.04. Em outro sistema ele
+# TENTA assim mesmo, nunca barra na porta. Onde o gestor de pacotes é
+# diferente (fora da familia Debian/Ubuntu) pode faltar algo no meio; o dono
+# fica avisado e o suporte resolve o resto.
 if [ -r /etc/os-release ]; then
   . /etc/os-release
   case "${ID:-}:${VERSION_ID:-}" in
-    ubuntu:22.04|ubuntu:24.04) : ;;
-    *) morre "esta VPS roda ${PRETTY_NAME:-sistema desconhecido}. O LEON pede Ubuntu 22.04 ou 24.04. No painel da Hostinger: VPS, Sistema operacional, reinstalar com Ubuntu 24.04." ;;
+    ubuntu:22.04|ubuntu:24.04) : ;;                       # testado, segue calado
+    *)
+      if command -v apt-get >/dev/null 2>&1; then
+        amarelo "Aviso: ${PRETTY_NAME:-este sistema} não é o testado (Ubuntu 22.04/24.04), mas uso o mesmo gestor de pacotes. Sigo a instalação normalmente."
+      else
+        amarelo "Aviso: ${PRETTY_NAME:-este sistema} usa outro gestor de pacotes (não é Debian/Ubuntu). Vou tentar mesmo assim; se algum pacote não instalar, chama o suporte: $SUPORTE"
+      fi
+      ;;
   esac
 fi
 
