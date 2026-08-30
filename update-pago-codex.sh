@@ -1891,10 +1891,6 @@ required = {
     "appserver/index.cjs",
     "appserver/package.json",
     "lib/onboarding.js",
-    "lib/inbound.js",
-    "lib/meta-connect.js",
-    "lib/meta-mcp-codex-filter.cjs",
-    "lib/meta-account-guard.cjs",
     "lib-motores/codex-appserver.cjs",
     "smoke/appserver-smoke.cjs",
     "workers/piper.js",
@@ -1917,10 +1913,16 @@ for member in members:
         if name not in directories:
             raise SystemExit(1)
         continue
-    if not member.isfile() or name not in required or member.size > 2_000_000:
+    if not member.isfile() or member.size > 2_000_000:
+        raise SystemExit(1)
+    parent = posixpath.dirname(name)
+    if parent:
+        if parent not in directories:
+            raise SystemExit(1)
+    elif name not in required:
         raise SystemExit(1)
     seen.add(name)
-raise SystemExit(0 if seen == required else 1)
+raise SystemExit(0 if required <= seen else 1)
 PY
 then
   fatal "o bundle Codex v2 é incompleto ou contém caminho inseguro."
@@ -1936,7 +1938,7 @@ if d.get("schema")!=1 or d.get("kind")!="leon-codex-capabilities": raise SystemE
 if d.get("attachments",{}).get("curatedOfficePreconversion") is not False: raise SystemExit(1)
 if d.get("optionalNotProvisionedByCore",{}).get("googleWorkspace") is not False: raise SystemExit(1)
 PY
-for runtime_js in bridge.cjs appserver/adapter.cjs lib/onboarding.js lib/inbound.js lib/meta-connect.js lib/meta-mcp-codex-filter.cjs lib/meta-account-guard.cjs lib-motores/codex-appserver.cjs smoke/appserver-smoke.cjs workers/piper.js; do
+for runtime_js in bridge.cjs appserver/adapter.cjs lib/onboarding.js lib-motores/codex-appserver.cjs smoke/appserver-smoke.cjs workers/piper.js; do
   "$NODE_BIN" --check "$BUNDLE_EXTRACT/$runtime_js" >/dev/null 2>&1 \
     || fatal "o runtime Codex v2 contém JavaScript inválido: $runtime_js."
 done
