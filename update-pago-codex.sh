@@ -2198,6 +2198,15 @@ _cron_add(){ local linha="$1" chave="$2" cur; command -v crontab >/dev/null 2>&1
   printf %s "$cur" | grep -qE "$(printf %s "$chave" | sed 's/[].[^$*\\/]/\\&/g')( |$|>)" && return 0
   { [ -n "$cur" ] && printf '%s\n' "$cur"; printf '%s\n' "$linha"; } | crontab - 2>/dev/null || true; }
 [ -f "$INSTALL_DIR/scripts/backup-diario.sh" ] && _cron_add "40 3 * * * $INSTALL_DIR/scripts/backup-diario.sh >/dev/null 2>&1" "$INSTALL_DIR/scripts/backup-diario.sh"
+# 2b) AUTO-UPDATE (31/08, achado do raio-x da frota): casa instalada antes de
+# agendar_rede existir (install.sh de 17/08) nunca ganhou os 4 cron do
+# atualizador — fica CONGELADA pra sempre, porque so o proprio cron chama
+# update-pago.sh de novo. Sem isto aqui, nao ha segunda chance: o updater que
+# ligaria o cron so roda DENTRO do cron que falta. Autocura idempotente.
+[ -f "$INSTALL_DIR/scripts/update-guard.sh" ]   && _cron_add "*/5 * * * * $INSTALL_DIR/scripts/update-guard.sh >/dev/null 2>&1"   "$INSTALL_DIR/scripts/update-guard.sh"
+[ -f "$INSTALL_DIR/scripts/update-verdict.sh" ] && _cron_add "* * * * * $INSTALL_DIR/scripts/update-verdict.sh >/dev/null 2>&1" "$INSTALL_DIR/scripts/update-verdict.sh"
+[ -f "$INSTALL_DIR/scripts/update-auto.sh" ]    && _cron_add "13 * * * * $INSTALL_DIR/scripts/update-auto.sh >/dev/null 2>&1"   "$INSTALL_DIR/scripts/update-auto.sh"
+[ -f "$INSTALL_DIR/scripts/aviso-manha.sh" ]    && _cron_add "21 * * * * $INSTALL_DIR/scripts/aviso-manha.sh >/dev/null 2>&1"   "$INSTALL_DIR/scripts/aviso-manha.sh"
 # 3b) MODELO DE AUDIO NATIVO (25/08, caso Leticia): casa instalada antes do fix
 # nao tem o modelo whisper — o 1o audio do cliente dispara download de 464MB DENTRO
 # do bridge rodando (pico ~580MB de RAM = perfil de OOM em VPS pequena). Baixa AGORA,
