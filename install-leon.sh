@@ -641,13 +641,56 @@ codex_env_limpo() {
 # A URL/codigo aparece no proprio terminal (SEM </dev/tty: o --device-auth nao
 # le do stdin, mostra o codigo e espera a autorizacao pela web), e confirma com
 # 'login status' que a sessao ficou valida antes de seguir.
+# Auth do Codex parece utilizavel? (auth.json parseavel com refresh_token OU api key).
+# Serve pra NAO disparar device-auth destrutivo quando o "login status" falha por
+# AMBIENTE (env -i/PATH limpo), nao por auth ruim. Preserva o login existente.
+codex_auth_looks_valid() {
+  local auth_file="$LEON_CODEX_HOME/auth.json"
+  [ -f "$auth_file" ] || return 1
+  python3 - "$auth_file" >/dev/null 2>&1 <<'PY' || return 1
+import json,sys
+try:
+    with open(sys.argv[1]) as f: d=json.load(f)
+except Exception: raise SystemExit(1)
+if not isinstance(d,dict): raise SystemExit(1)
+tok=d.get("tokens") or {}
+has_refresh=isinstance(tok,dict) and bool(tok.get("refresh_token"))
+has_apikey=bool(d.get("OPENAI_API_KEY"))
+raise SystemExit(0 if (has_refresh or has_apikey) else 1)
+PY
+}
+
 codex_login_unificado() {
   [ -x "$LEON_CODEX_BIN_RESOLVED" ] && [ -x "$LEON_NODE_BIN_RESOLVED" ] \
     || { echo "ERRO: runtime dedicado do Codex ausente na hora do login." >&2; return 1; }
+
+  # 1) Caminho feliz: o proprio codex confirma a sessao.
   if codex_env_limpo login status >/dev/null 2>&1; then
     echo ">> Codex ja esta autenticado nesta VPS."
     return 0
   fi
+
+  # 2) "login status" falhou. Pode ser AMBIENTE (env -i/PATH limpo), nao auth ruim.
+  #    Se existe auth.json parseavel com credencial, PRESERVA e NUNCA dispara
+  #    device-auth (que apagaria o auth existente sem poder completar sem tty).
+  #    O bug que mutou Delano/99: reinstalacao nao-interativa rodava device-auth
+  #    cego, destruia o auth valido, e o cliente ficava mudo. O /login pelo
+  #    Telegram (2.4.4) faz o relogin depois se o refresh expirou de verdade.
+  if codex_auth_looks_valid; then
+    echo ">> Codex ja tem credencial nesta VPS (login preservado; relogin pelo /login se precisar)."
+    return 0
+  fi
+
+  # 3) Sem auth utilizavel E sem terminal interativo (reinstalacao via curl|bash):
+  #    NAO dispara device-auth (nao completaria e pode danificar estado). Aborta
+  #    sem tocar em auth; o dono instala num terminal, ou usa /login pelo Telegram.
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    echo "ERRO: Codex sem sessao e sem terminal interativo para o login. Nenhum runtime LEON foi trocado." >&2
+    echo "      Rode a instalacao num terminal interativo, ou use o /login pelo Telegram apos instalar." >&2
+    return 1
+  fi
+
+  # 4) Instalacao NOVA com tty: device-auth interativo normal.
   echo ""
   echo "========================================"
   echo "  LOGIN DO CODEX"
