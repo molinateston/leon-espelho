@@ -1455,6 +1455,10 @@ allowed_files = {
     "appserver/index.cjs",
     "appserver/package.json",
     "lib/onboarding.js",
+    "lib/inbound.js",
+    "lib/meta-connect.js",
+    "lib/meta-mcp-codex-filter.cjs",
+    "lib/meta-account-guard.cjs",
     "lib-motores/codex-appserver.cjs",
     "smoke/appserver-smoke.cjs",
     "workers/piper.js",
@@ -1955,7 +1959,7 @@ enabled = true
 network_access = true
 
 [features]
-multi_agent_v2 = false
+multi_agent_v2 = true
 
 [agents]
 enabled = true
