@@ -1094,14 +1094,18 @@ ignore_default_excludes = false
 EOF
   # Preserva a conexão Meta (meta-connect): se o dono já conectou, o bloco MCP re-entra no
   # candidate. Sem isto, TODO update regenerava o config.toml do template e desconectava o
-  # Meta em silêncio (achado da auditoria 26/08). O token NÃO entra aqui: só a referência
-  # por variável de ambiente, que o bridge injeta no spawn do app-server.
+  # Meta em silêncio (achado da auditoria 26/08). MODO-FILTRO (idêntico ao que
+  # lib/meta-connect.js:writeMcpConfig gera): o Codex spawna o filtro local
+  # meta-mcp-codex-filter.cjs, que aplica a allowlist de leitura (5 ads_insights_*) e lê o
+  # token DIRETO do .meta-token.json — por isso NÃO há bearer_token_env_var nem url-crua. A
+  # url-crua expunha os 106 tools da Meta (incl. escrita) e cada /atualiza a regravava, matando
+  # o filtro instalado pelo meta-connect (achado Fable 30/08).
   if [ -f "$INSTALL_DIR/.meta-token.json" ]; then
-    cat >> "$destination" <<'METAEOF'
+    cat >> "$destination" <<METAEOF
 
 [mcp_servers.meta-ads]
-url = "https://mcp.facebook.com/ads"
-bearer_token_env_var = "META_MCP_TOKEN"
+command = "node"
+args = ["$INSTALL_DIR/lib/meta-mcp-codex-filter.cjs"]
 METAEOF
   fi
   chmod 0600 "$destination"
