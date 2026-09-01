@@ -1449,6 +1449,20 @@ health_smoke() {
   telegram_smoke "$live"
 }
 
+# Report de versao HONESTO: so chamado pelo finalizador, com a versao REAL que ficou
+# viva (nova no succeeded, antiga no rollback). Best-effort: falha de rede nao afeta nada.
+report_version_from_tx() {
+  local tx="$1" which_ver="$2" ver email central
+  ver="$(cat "$tx/$which_ver" 2>/dev/null || true)"
+  email="$(cat "$tx/report-email" 2>/dev/null || true)"
+  central="$(cat "$tx/report-central" 2>/dev/null || true)"
+  [ -n "$ver" ] && [ -n "$email" ] && [ -n "$central" ] || return 0
+  printf %s "$central" | grep -qE '^https://' || return 0
+  curl -fsS --max-time 15 -X POST "$central/versao-report" \
+    -H 'Content-Type: application/json' \
+    -d "{\"email\":\"$email\",\"versao\":\"$ver\"}" >/dev/null 2>&1 || true
+}
+
 finalize_transaction() {
   local tx="$1" marker live lock_dir thread chat tx_service skills_backup skills_path
   case "$tx" in /*/update-transactions/*) ;; *) return 1 ;; esac
@@ -1483,12 +1497,17 @@ finalize_transaction() {
     printf 'succeeded\n' > "$tx/status"
     remove_finalize_cron "$marker"
     rm -f -- "$live/.update-pending.json" 2>/dev/null || true
+    # Report HONESTO: a versao NOVA so agora, depois de passar na prova de saude.
+    report_version_from_tx "$tx" new-version
     notify_from_runtime "$live" "✅ Atualização concluída. O motor Codex passou nos testes e o LEON está no ar." "$thread" "$chat"
     rmdir -- "$lock_dir" 2>/dev/null || true
     trap - RETURN
     return 0
   fi
   rollback_transaction "$tx"
+  # Report HONESTO: o update falhou e reverteu; a central precisa saber que a versao
+  # viva e a ANTIGA, nao a nova. Sem isso o painel/monitor registrava sucesso falso.
+  report_version_from_tx "$tx" prev-version
   rmdir -- "$lock_dir" 2>/dev/null || true
   trap - RETURN
   return 1
@@ -1697,6 +1716,13 @@ printf '%s\n' "$CHAT_ARG" > "$TX_DIR/chat-id"
 printf '%s\n' "$LEON_SKILLS_DIR" > "$TX_DIR/skills-path"
 printf '%s\n' "$SKILLS_BACKUP" > "$TX_DIR/skills-backup-path"
 printf '%s\n' "$SKILLS_FAILED" > "$TX_DIR/skills-failed-path"
+# Report de versao HONESTO (fix report-falso): o finalizador reporta a versao NOVA
+# so depois da prova de saude (succeeded); no rollback reporta a versao ANTIGA (a que
+# voltou). Sem isso a central registrava a nova mesmo quando o update falhava e revertia.
+# (prev-version e gravado adiante, depois de INSTALLED_RELEASE_VERSION existir.)
+printf '%s\n' "$version" > "$TX_DIR/new-version"
+printf '%s\n' "$EMAIL" > "$TX_DIR/report-email"
+printf '%s\n' "$CENTRAL" > "$TX_DIR/report-central"
 printf '0\n' > "$TX_DIR/skills-had-original"
 printf '0\n' > "$TX_DIR/skills-applied"
 
@@ -1748,6 +1774,8 @@ semver_ge "$version" "$minVersion" || fatal "release abaixo da versão mínima a
 INSTALLED_RELEASE_IDENTITY="$(read_installed_release_identity "$INSTALL_DIR")" \
   || fatal "o marcador da release instalada é inseguro ou inválido."
 IFS=$'\t' read -r INSTALLED_RELEASE_VERSION INSTALLED_RELEASE_DIGEST <<< "$INSTALLED_RELEASE_IDENTITY"
+# prev-version pro report honesto no rollback (o TX_DIR ja existe desde a preparacao).
+printf '%s\n' "$INSTALLED_RELEASE_VERSION" > "$TX_DIR/prev-version" 2>/dev/null || true
 release_identity_acceptable "$version" "$RELEASE_MANIFEST_SHA256" "$INSTALLED_RELEASE_VERSION" "${INSTALLED_RELEASE_DIGEST:-}" \
   || fatal "manifesto assinado é downgrade, replay ambíguo ou equivoca a release $INSTALLED_RELEASE_VERSION."
 
@@ -2246,12 +2274,11 @@ if [ ! -d "$INSTALL_DIR/node_modules/pg" ]; then
   ( cd "$INSTALL_DIR" && timeout 120 npm install -q --no-save pg >/dev/null 2>&1 ) || true
 fi
 
-# 4) REPORTA A VERSAO pra central (24/08): a rota /versao-report existia e NINGUEM
-# chamava — versao_atual vazia nas 32 licencas, dono cego sobre quem esta em qual
-# versao. Best-effort: falha de rede nao atrapalha o update.
-curl -fsS --max-time 15 -X POST "$CENTRAL/versao-report" \
-  -H 'Content-Type: application/json' \
-  -d "{\"email\":\"$EMAIL\",\"versao\":\"$version\"}" >/dev/null 2>&1 || true
+# 4) REPORT DE VERSAO: NAO reportamos a versao nova aqui (fix report-falso). Reportar
+# antes do restart+prova de saude fazia a central registrar sucesso mesmo quando o
+# finalizador revertia — painel/monitor mentiam. Agora quem reporta e o finalizador,
+# com a versao REAL que ficou viva (nova no succeeded, antiga no rollback). Ver
+# report_version_from_tx() + os call sites em finalize_transaction().
 
 say "commit atomico concluido; reiniciando $SERVICE"
 if [ "$TEST_MODE" = "1" ]; then
