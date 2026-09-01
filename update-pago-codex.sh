@@ -453,10 +453,24 @@ try:
  m=json.load(open(mp,encoding="utf-8"))
 except Exception: raise SystemExit(1)
 if set(m)!={"capabilities","content_tree_format","content_tree_sha256","excluded","files","kind","placeholders","schema","skill_count","skills","source"}: raise SystemExit(1)
-if m["schema"]!=2 or m["kind"]!="leon-codex-minimal-skills" or m["skills"]!=["soft-critico-copy","soft-designer"] or m["skill_count"]!=2: raise SystemExit(1)
+# Release A transicional: aceita o catálogo MINIMAL (2 fixas pinadas) OU o CURATED (>=30, validação estrutural).
+if m["schema"]!=2: raise SystemExit(1)
+if not isinstance(m["skills"],list) or m["skill_count"]!=len(m["skills"]): raise SystemExit(1)
+if not all(isinstance(s,str) and re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}",s) and s not in (".","..") for s in m["skills"]) or len(set(m["skills"]))!=len(m["skills"]): raise SystemExit(1)
+if m["kind"]=="leon-codex-minimal-skills":
+ if m["skills"]!=["soft-critico-copy","soft-designer"] or m["skill_count"]!=2: raise SystemExit(1)
+elif m["kind"]=="leon-codex-curated-skills":
+ if m["skill_count"]<30: raise SystemExit(1)
+else:
+ raise SystemExit(1)
 if m["placeholders"]!={"@@LEON_SKILLS_DIR@@":"absolute read-only skills directory","@@LEON_WORK_AREA@@":"absolute user work directory"}: raise SystemExit(1)
-if m["capabilities"]!={"connectors_required":False,"credentials_collected_in_chat":False,"designer_output":"self-contained HTML attachment","dynamic_dependency_install":False,"network_required":False}: raise SystemExit(1)
-if m["source"]!={"commit":"35a8ee976ff079396b26ce1bc19919b1f8c1a05f","dirty":False,"repository":"https://github.com/molinateston/soft.git"}: raise SystemExit(1)
+# capabilities: metadado declaratorio, nao gate de seguranca. Exigimos o campo presente e do tipo objeto,
+# sem pin de igualdade (o catalogo curado declara {catalog_scope,credentials_collected_in_chat,runtime_paths_normalized}).
+if not isinstance(m["capabilities"],dict): raise SystemExit(1)
+# Sem pin de commit (o catálogo curado atualiza): valida só repositório esperado e árvore limpa.
+if not isinstance(m["source"],dict) or set(m["source"])!={"commit","dirty","repository"}: raise SystemExit(1)
+if m["source"]["repository"]!="https://github.com/molinateston/soft.git" or m["source"]["dirty"] is not False: raise SystemExit(1)
+if not re.fullmatch(r"[0-9a-f]{40}",str(m["source"]["commit"])): raise SystemExit(1)
 entries={}; paths=[]; lines=[]
 for item in m["files"]:
  if not isinstance(item,dict) or set(item)!={"path","sha256","bytes","mode"}: raise SystemExit(1)
@@ -1106,6 +1120,8 @@ EOF
 [mcp_servers.meta-ads]
 command = "node"
 args = ["$INSTALL_DIR/lib/meta-mcp-codex-filter.cjs"]
+startup_timeout_sec = 20
+tool_timeout_sec = 30
 METAEOF
   fi
   chmod 0600 "$destination"
