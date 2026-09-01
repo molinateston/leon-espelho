@@ -1574,7 +1574,11 @@ cleanup_main() {
       [ ! -e "$STAGE" ] || rm -rf -- "$STAGE"
     else
       [ ! -e "$STAGE" ] || rm -rf -- "$STAGE"
-      [ -z "${SKILLS_STAGE:-}" ] || [ ! -e "$SKILLS_STAGE" ] || rm -rf -- "$SKILLS_STAGE"
+      # normalize_skills_catalog sela o stage read-only (dirs 0o500, arquivos 0o400/0o500)
+      # pra congelar o catálogo assinado. rm -rf num dir 0o500 FALHA (sem +w não remove os
+      # filhos) e o /atualiza abortava aqui, deixando um stage órfão que travava os próximos
+      # updates. Devolve +w antes de apagar — o stage vai sumir de qualquer forma no rollback.
+      [ -z "${SKILLS_STAGE:-}" ] || [ ! -e "$SKILLS_STAGE" ] || { chmod -R u+w -- "$SKILLS_STAGE" 2>/dev/null; rm -rf -- "$SKILLS_STAGE"; }
       if [ "$CRON_ARMED" -eq 1 ]; then
         restore_crontab_from_tx "$TX_DIR" >/dev/null 2>&1 || true
       fi
