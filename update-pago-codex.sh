@@ -1746,13 +1746,11 @@ printf '%s\n' "$CHAT_ARG" > "$TX_DIR/chat-id"
 printf '%s\n' "$LEON_SKILLS_DIR" > "$TX_DIR/skills-path"
 printf '%s\n' "$SKILLS_BACKUP" > "$TX_DIR/skills-backup-path"
 printf '%s\n' "$SKILLS_FAILED" > "$TX_DIR/skills-failed-path"
-# Report de versao HONESTO (fix report-falso): o finalizador reporta a versao NOVA
-# so depois da prova de saude (succeeded); no rollback reporta a versao ANTIGA (a que
-# voltou). Sem isso a central registrava a nova mesmo quando o update falhava e revertia.
-# (prev-version e gravado adiante, depois de INSTALLED_RELEASE_VERSION existir.)
-printf '%s\n' "$version" > "$TX_DIR/new-version"
-printf '%s\n' "$EMAIL" > "$TX_DIR/report-email"
-printf '%s\n' "$CENTRAL" > "$TX_DIR/report-central"
+# Report de versao HONESTO (fix report-falso): new-version/email/central sao gravados
+# ADIANTE, junto do prev-version, DEPOIS que $version existe (. RELEASE_METADATA na ~1801).
+# FIX 02/09 (bug que travou a 2.4.17): gravar $version AQUI estourava "version: unbound
+# variable" sob set -u — $version so nasce 47 linhas abaixo. O update morria antes de
+# trocar o bridge e o vigia via "assinatura igual, sem sinal de conclusao".
 printf '0\n' > "$TX_DIR/skills-had-original"
 printf '0\n' > "$TX_DIR/skills-applied"
 
@@ -1823,6 +1821,12 @@ if ! INSTALLED_RELEASE_IDENTITY="$(read_installed_release_identity "$INSTALL_DIR
   INSTALLED_RELEASE_IDENTITY=$'0.0.0\t'
 fi
 IFS=$'\t' read -r INSTALLED_RELEASE_VERSION INSTALLED_RELEASE_DIGEST <<< "$INSTALLED_RELEASE_IDENTITY"
+# Report de versao HONESTO (movido pra CA no fix 02/09): agora $version, $EMAIL e $CENTRAL
+# ja existem (. RELEASE_METADATA rodou acima). new-version = a versao que o finalizador
+# reporta no succeeded; prev-version = a antiga que ele reporta no rollback.
+printf '%s\n' "$version" > "$TX_DIR/new-version" 2>/dev/null || true
+printf '%s\n' "$EMAIL"   > "$TX_DIR/report-email" 2>/dev/null || true
+printf '%s\n' "$CENTRAL" > "$TX_DIR/report-central" 2>/dev/null || true
 # prev-version pro report honesto no rollback (o TX_DIR ja existe desde a preparacao).
 printf '%s\n' "$INSTALLED_RELEASE_VERSION" > "$TX_DIR/prev-version" 2>/dev/null || true
 release_identity_acceptable "$version" "$RELEASE_MANIFEST_SHA256" "$INSTALLED_RELEASE_VERSION" "${INSTALLED_RELEASE_DIGEST:-}" \
