@@ -1499,7 +1499,10 @@ finalize_transaction() {
     rm -f -- "$live/.update-pending.json" 2>/dev/null || true
     # Report HONESTO: a versao NOVA so agora, depois de passar na prova de saude.
     report_version_from_tx "$tx" new-version
-    notify_from_runtime "$live" "✅ Atualização concluída. O motor Codex passou nos testes e o LEON está no ar." "$thread" "$chat"
+    # SEM msg de sucesso aqui: quem confirma "✅ No ar!" pro dono e o BRIDGE ao subir
+    # (bridge.cjs, veioDeUpdate). Emitir aqui TAMBEM gerava mensagem DUPLICADA no Telegram
+    # ("Atualizacao concluida" + "No ar!"). A saudacao do bridge e a fonte unica, e ela so
+    # dispara quando o processo REALMENTE voltou vivo — prova melhor que "passou nos testes".
     rmdir -- "$lock_dir" 2>/dev/null || true
     trap - RETURN
     return 0
@@ -2255,6 +2258,25 @@ _cron_add(){ local linha="$1" chave="$2" cur; command -v crontab >/dev/null 2>&1
 [ -f "$INSTALL_DIR/scripts/update-verdict.sh" ] && _cron_add "* * * * * $INSTALL_DIR/scripts/update-verdict.sh >/dev/null 2>&1" "$INSTALL_DIR/scripts/update-verdict.sh"
 [ -f "$INSTALL_DIR/scripts/update-auto.sh" ]    && _cron_add "13 * * * * $INSTALL_DIR/scripts/update-auto.sh >/dev/null 2>&1"   "$INSTALL_DIR/scripts/update-auto.sh"
 [ -f "$INSTALL_DIR/scripts/aviso-manha.sh" ]    && _cron_add "21 * * * * $INSTALL_DIR/scripts/aviso-manha.sh >/dev/null 2>&1"   "$INSTALL_DIR/scripts/aviso-manha.sh"
+# 2c) CRON VIVO + MOTOR RESERVA (fix bug-de-nascenca 01/09): as entradas acima so
+# valem com o daemon cron de pe. O updater roda com o usuario do LEON; o sudoers NOVO
+# (instalador consertado) permite religar o cron e o motor reserva sem senha. Tento
+# religar; se nao der (casa antiga sem o sudoers novo), deixo rastro pro /status e
+# um aviso — nunca fatal, sempre best-effort. O motor reserva (leon-vigia.timer) e o
+# que garante o /atualiza mesmo com o cron morto.
+if ! pgrep -x cron >/dev/null 2>&1 && ! pgrep -x crond >/dev/null 2>&1; then
+  sudo -n /bin/systemctl unmask cron >/dev/null 2>&1 || true
+  sudo -n /bin/systemctl enable --now cron >/dev/null 2>&1 || true
+  sleep 1
+fi
+sudo -n /bin/systemctl enable --now leon-vigia.timer >/dev/null 2>&1 || true
+if ! pgrep -x cron >/dev/null 2>&1 && ! pgrep -x crond >/dev/null 2>&1 \
+   && ! sudo -n /bin/systemctl is-active leon-vigia.timer >/dev/null 2>&1; then
+  printf '{"visto_em":%s}\n' "$(date +%s)" > "$INSTALL_DIR/.cron-morto.json" 2>/dev/null || true
+  notify_from_runtime "$INSTALL_DIR" "⚠️ Me atualizei, mas o agendador da tua VPS (o cron) esta parado e nao consegui religar sozinho — sem ele o backup diario e a rede de seguranca nao rodam. Me chama que eu te passo como destravar (e 1 comando)." "$THREAD_ARG" "$CHAT_ARG" || true
+else
+  rm -f "$INSTALL_DIR/.cron-morto.json" 2>/dev/null || true
+fi
 # 3b) MODELO DE AUDIO NATIVO (25/08, caso Leticia): casa instalada antes do fix
 # nao tem o modelo whisper — o 1o audio do cliente dispara download de 464MB DENTRO
 # do bridge rodando (pico ~580MB de RAM = perfil de OOM em VPS pequena). Baixa AGORA,

@@ -1014,7 +1014,19 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
     || { echo "ERRO: pacotes base do sistema nao instalaram." >&2
          [ -s /tmp/apt-base.err ] && echo "detalhe apt: $(tail -n 3 /tmp/apt-base.err)" >&2
          echo "abortando. suporte: https://wa.me/5511961562217" >&2; exit 1; }
+  # CRON ROBUSTO (fix bug-de-nascenca 01/09): o `|| true` cego deixava a casa nascer
+  # com o cron MORTO sem ninguem saber — e o /atualiza (que roda pelo cron) travava
+  # eterno. Agora liga de verdade, desmascara, e CONFERE. O motor reserva (leon-vigia.timer,
+  # criado adiante) garante o /atualiza mesmo se o cron ainda assim nao subir.
+  systemctl unmask cron >/dev/null 2>&1 || true
   systemctl enable --now cron >/dev/null 2>&1 || true
+  systemctl is-active --quiet cron 2>/dev/null || { service cron start >/dev/null 2>&1 || true; sleep 1; }
+  if systemctl is-active --quiet cron 2>/dev/null || pgrep -x cron >/dev/null 2>&1; then
+    echo "   cron: ativo."
+  else
+    echo "   AVISO: o cron nao subiu nesta VPS. O /atualiza fica garantido pelo motor reserva"
+    echo "     (leon-vigia.timer); backup e rotinas dependem de religar o cron depois."
+  fi
   locale-gen C.UTF-8 2>/dev/null || true
 
   # POSTGRES (24/08, lei do dono: "o cliente precisa ter o meu LEON com todas as
@@ -1107,15 +1119,52 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
   write_service_unit /etc/systemd/system/leon-agente.service "$LEON_USER" "$INSTALL_DIR_TMP" "$NODE_BIN_UNIT" "$LEON_ENGINE"
   systemctl daemon-reload
 
+  # MOTOR RESERVA (fix bug-de-nascenca 01/09): o /atualiza depende de um vigia
+  # (scripts/update-verdict.sh) que so o cron rodava — cron morto = /atualiza travado
+  # eterno. Este timer do systemd (SYSTEM, imune ao cron) roda o MESMO vigia a cada
+  # minuto no segundo :30 (fora de fase do cron no :00). O vigia tem trava atomica
+  # (mkdir), entao cron + timer coexistem sem duplicar. Casa nova nasce imune: mesmo
+  # sem cron, o LEON se atualiza sozinho.
+  cat > /etc/systemd/system/leon-vigia.service <<EOF
+[Unit]
+Description=LEON vigia do /atualiza (motor reserva, independente do cron)
+[Service]
+Type=oneshot
+User=$LEON_USER
+WorkingDirectory=$INSTALL_DIR_TMP
+ExecStart=/usr/bin/env bash $INSTALL_DIR_TMP/scripts/update-verdict.sh
+KillMode=process
+TimeoutStartSec=90
+EOF
+  cat > /etc/systemd/system/leon-vigia.timer <<EOF
+[Unit]
+Description=LEON vigia a cada minuto (motor reserva do /atualiza, independente do cron)
+[Timer]
+OnCalendar=*-*-* *:*:30
+AccuracySec=1s
+Persistent=false
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl enable --now leon-vigia.timer >/dev/null 2>&1 \
+    && echo "   motor reserva do /atualiza: ativo (imune ao cron)." \
+    || echo "   AVISO: motor reserva nao ativou; /atualiza depende so do cron."
+
   # Libera $LEON_USER a controlar SOMENTE o proprio service (sudo estreito, sem senha).
   # journalctl SEM coringa no fim e SEMPRE com --no-pager: com coringa, o agente podia pedir
   # uma saida que abre o "less" como root, e o less tem um comando (!) que abre terminal — ai
   # o acesso "estreito" virava root de verdade. Duas linhas fixas (com e sem -f) cobrem o uso
   # real (ver log recente, acompanhar ao vivo) sem deixar escolher flag nenhuma.
+  # AUTO-CURA DO CRON (01/09): o LEON detecta o cron morto (cronDaemonVivo no bridge) e
+  # PODE religar sozinho — sem o dono leigo tocar no terminal. Escopo ESTREITO: so os
+  # comandos exatos de religar o cron e o motor reserva (nada de coringa, nada de shell).
+  # Nao e "root de verdade": e um punhado de systemctl fixos, cada um cravado.
   cat > /etc/sudoers.d/leon-agente <<EOF
-$LEON_USER ALL=(root) NOPASSWD: /bin/systemctl start leon-agente.service, /bin/systemctl stop leon-agente.service, /bin/systemctl restart leon-agente.service, /bin/systemctl enable leon-agente.service, /bin/systemctl disable leon-agente.service, /bin/systemctl status leon-agente.service, /bin/systemctl is-active leon-agente.service, /bin/systemctl enable --now leon-agente.service, /usr/bin/journalctl -u leon-agente.service -n 200 --no-pager, /usr/bin/journalctl -u leon-agente.service -n 200 --no-pager -f
+$LEON_USER ALL=(root) NOPASSWD: /bin/systemctl start leon-agente.service, /bin/systemctl stop leon-agente.service, /bin/systemctl restart leon-agente.service, /bin/systemctl enable leon-agente.service, /bin/systemctl disable leon-agente.service, /bin/systemctl status leon-agente.service, /bin/systemctl is-active leon-agente.service, /bin/systemctl enable --now leon-agente.service, /usr/bin/journalctl -u leon-agente.service -n 200 --no-pager, /usr/bin/journalctl -u leon-agente.service -n 200 --no-pager -f, /bin/systemctl unmask cron, /bin/systemctl enable --now cron, /bin/systemctl start cron, /bin/systemctl is-active cron, /bin/systemctl enable --now leon-vigia.timer, /bin/systemctl start leon-vigia.timer, /bin/systemctl is-active leon-vigia.timer
 EOF
   chmod 0440 /etc/sudoers.d/leon-agente
+  visudo -cf /etc/sudoers.d/leon-agente >/dev/null 2>&1 || echo "   AVISO: sudoers do leon-agente falhou na validacao (visudo)."
   visudo -c -f /etc/sudoers.d/leon-agente >/dev/null
 
   # Roda um comando como o usuario do LEON, em env limpo (HOME dele, PATH do
