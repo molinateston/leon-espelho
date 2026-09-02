@@ -261,6 +261,18 @@ if [ "$TEST_MODE" = "1" ]; then
   PYTHON_BIN="${LEON_PYTHON_BIN:-$PYTHON_BIN}"
 fi
 
+# 02/set (feature-detect, achado do Fable): --retry-all-errors só existe em curl >= 7.71 (2020).
+# Em curl velho (Ubuntu 20.04 tem 7.68, Debian 10 tem 7.64), passar essa opção DERRUBA o curl com
+# exit 2 ANTES de tocar a rede — mataria TODO /atualiza permanente, mudo, no cliente com curl antigo,
+# e o instalador não bloqueia OS velho. Detecto UMA vez (sem rede, --version). Se o curl suporta,
+# CURL_RETRY_ALL="--retry-all-errors"; senão fica VAZIO. Nos curls de download uso $CURL_RETRY_ALL
+# SEM ASPAS de propósito: em curl velho expande pra nada = comportamento antigo, que funcionava.
+# NÃO botar aspas aqui — aspas virariam um argumento vazio "" que o curl também rejeita.
+CURL_RETRY_ALL=""
+if "$CURL_BIN" --retry-all-errors --version >/dev/null 2>&1; then
+  CURL_RETRY_ALL="--retry-all-errors"
+fi
+
 if [ "$(id -u)" -eq 0 ] && [ "$TEST_MODE" != "1" ]; then
   printf 'ERRO: o atualizador deve rodar como o usuário do LEON, nunca como root.\n' >&2
   exit 1
@@ -671,14 +683,19 @@ PY
 LEON_ESPELHO="${LEON_ESPELHO:-https://raw.githubusercontent.com/molinateston/leon-espelho/main}"
 baixa_com_espelho() {  # baixa_com_espelho <caminho-na-central> <destino> <max-bytes>
   local rel="$1" dest="$2" max="$3"
-  if curl -fsSL --max-filesize "$max" --retry 2 --retry-delay 2 --retry-connrefused \
-      --max-time 180 "$CENTRAL$rel" -o "$dest" 2>/dev/null; then
+  # 02/set (blindagem do /atualiza pra escala): o /atualiza é o canal de conserto remoto e não
+  # pode morrer por soluço de rede. Antes: --retry só cobria conexão-recusada e não havia
+  # --connect-timeout. Agora: --retry-all-errors (cobre 5xx/429 momentâneo da central), --retry 4,
+  # --connect-timeout 20 (não fica pendurado tentando conectar). A segurança é o sha+assinatura
+  # DEPOIS do download — insistir no download não afrouxa nada.
+  if curl -fsSL --max-filesize "$max" --retry 4 --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL \
+      --connect-timeout 20 --max-time 180 "$CENTRAL$rel" -o "$dest" 2>/dev/null; then
     return 0
   fi
   # central fora: o espelho publico assume. O nome do arquivo e o mesmo dos dois lados.
   local nome="${rel##*/}"
-  if [ -n "$nome" ] && curl -fsSL --max-filesize "$max" --retry 2 --retry-delay 2 \
-      --max-time 180 "$LEON_ESPELHO/$nome" -o "$dest" 2>/dev/null; then
+  if [ -n "$nome" ] && curl -fsSL --max-filesize "$max" --retry 4 --retry-delay 2 $CURL_RETRY_ALL \
+      --connect-timeout 20 --max-time 180 "$LEON_ESPELHO/$nome" -o "$dest" 2>/dev/null; then
     say "   (a central nao respondeu; peguei do espelho publico)"
     return 0
   fi
@@ -695,7 +712,10 @@ run_candidate_model_smoke() {
   prepare_smoke_codex_home "$CODEX_HOME_DIR" "$tx/config.candidate" "$MODEL_SMOKE_HOME" || status=1
   if [ "$status" -eq 0 ]; then
     mkdir -m 0700 "$MODEL_SMOKE_DIR"
-    if ! PATH="$(dirname "$NODE_BIN"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    # 02/set: teto de tempo no smoke. Se o login vencido PENDURAR a conexão (em vez de dar erro
+    # rápido), sem isto o /atualiza ficava travado esperando. timeout 90 = o smoke "falha rápido"
+    # e, como agora ele é só aviso (não veto), o update segue e o dono é avisado pra renovar login.
+    if ! timeout 90 env PATH="$(dirname "$NODE_BIN"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
       CODEX_HOME="$MODEL_SMOKE_HOME" LEON_CODEX_HOME="$MODEL_SMOKE_HOME" CODEX_BIN="$CODEX_BIN_PATH" \
       CODEX_MODEL="${CODEX_MODEL_EFETIVO:-gpt-5.6-sol}" LEON_RUNTIME_DIR="$live" LEON_SMOKE_DIR="$MODEL_SMOKE_DIR" \
       "$NODE_BIN" "$live/smoke/appserver-smoke.cjs" >"$MODEL_SMOKE_OUT" 2>&1; then
@@ -1642,7 +1662,14 @@ case "$CONFIG_PATH" in "$HOME"/*) ;; *) fatal "o perfil Codex está fora da home
 for required in "$CURL_BIN" tar "$PYTHON_BIN" sha256sum cp mv; do
   command -v "$required" >/dev/null 2>&1 || fatal "falta o programa obrigatório: $required."
 done
-command -v "$CRONTAB_BIN" >/dev/null 2>&1 || fatal "o cron não está disponível para concluir a atualização com rollback."
+# 02/set: este gate checa o BINÁRIO crontab (command -v). Fable derrubou a ideia de "religar aqui":
+# systemctl enable --now cron religa o SERVIÇO, não instala o binário — se o binário sumiu, a unit
+# também não existe e o religar falha. E o cenário "VPS com cron parado" nunca foi barrado aqui
+# (serviço parado passa; só binário ausente barra). Então mantenho o gate, mas com mensagem HONESTA
+# que aponta o conserto real (reinstalar o pacote do agendador via instalador). O caso comum de
+# cron parado (binário presente) passa direto; o pós-sucesso (~2320) é quem religa o serviço.
+command -v "$CRONTAB_BIN" >/dev/null 2>&1 \
+  || fatal "o agendador (cron) não está instalado nesta máquina; rode o instalador de novo pra restaurá-lo — sem ele o /atualiza não consegue concluir com segurança."
 
 ENV_READ_SAFE="$(mktemp "${TMPDIR:-/tmp}/leon-env-read.XXXXXX")"
 safe_copy_state_file "$ENV_FILE" "$ENV_READ_SAFE" env \
@@ -1755,9 +1782,11 @@ RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/leon-release.XXXXXX.json")"
 RELEASE_SIGNATURE="$(mktemp "${TMPDIR:-/tmp}/leon-release.XXXXXX.sig")"
 RELEASE_PUBLIC_KEY="$(mktemp "${TMPDIR:-/tmp}/leon-release.XXXXXX.pem")"
 RELEASE_METADATA="$(mktemp "${TMPDIR:-/tmp}/leon-release.XXXXXX.env")"
-if ! curl_common -fsSL --max-filesize 524288 --retry 3 --retry-delay 2 --retry-connrefused \
+# 02/set: manifesto teimoso (mesma blindagem do baixa_com_espelho) — 5xx/429 momentâneo da
+# central não pode matar o /atualiza. --retry-all-errors + --connect-timeout 20 + --retry 4.
+if ! curl_common -fsSL --max-filesize 524288 --retry 4 --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL --connect-timeout 20 \
     "$CENTRAL/release-manifest.json" -o "$RELEASE_MANIFEST" \
-   || ! curl_common -fsSL --max-filesize 64 --retry 3 --retry-delay 2 --retry-connrefused \
+   || ! curl_common -fsSL --max-filesize 64 --retry 4 --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL --connect-timeout 20 \
     "$CENTRAL/release-manifest.sig" -o "$RELEASE_SIGNATURE"; then
   fatal "a central não entregou o manifesto assinado; runtime preservado."
 fi
@@ -1774,8 +1803,25 @@ semver_ge "$version" "$minVersion" || fatal "release abaixo da versão mínima a
   || fatal "a release exige Codex CLI $codexCliVersion; rode o instalador antes do /atualiza."
 [ "$nodeVersion" = "$LEON_NODE_VERSION" ] \
   || fatal "a release exige Node $nodeVersion; rode o instalador antes do /atualiza."
-INSTALLED_RELEASE_IDENTITY="$(read_installed_release_identity "$INSTALL_DIR")" \
-  || fatal "o marcador da release instalada é inseguro ou inválido."
+# 02/set (blindagem pra escala): o marcador .leon-release.json é escrito pelo PRÓPRIO updater.
+# Se corromper (queda de energia no meio de uma escrita, disco cheio), ele NÃO pode cortar o
+# canal de conserto — não é perigo de segurança, só um arquivo interno bobo. A assinatura da
+# release nova JÁ foi conferida (linha ~1768) e a versão-mínima também (~1773). Marcador ausente
+# a própria função já trata como versão legada/vazia; aqui trato o CORROMPIDO igual a "versão
+# desconhecida" e sigo — no pior caso o release_identity_acceptable abaixo decide upgrade/downgrade
+# com versão vazia (aceita a nova, que é o desejado num marcador ilegível).
+if ! INSTALLED_RELEASE_IDENTITY="$(read_installed_release_identity "$INSTALL_DIR")"; then
+  # Fable: a sentinela tem que ser 0.0.0 (não vazia). Versão vazia faz semver("") estourar
+  # SystemExit e o release_identity_acceptable abaixo cai em fatal com mensagem enganosa de
+  # "downgrade" — o conserto seria inócuo. Com 0.0.0 o marcador corrompido se comporta IGUAL ao
+  # marcador AUSENTE (read_installed_release_version já usa 0.0.0 nesse caso): new>0.0.0 → aceita
+  # a release nova, que é o desejado. TRADE-OFF registrado: marcador corrompido desarma o
+  # anti-downgrade (uma release velha, porém assinada e >= minVersion, seria aceita). É risco
+  # IDÊNTICO ao já aceito para marcador ausente, exige corrupção local + central servindo release
+  # velha, e TLS+assinatura barram MITM. Aceitável.
+  say "⚠️ marcador de versão instalada ilegível/corrompido — trato como versão desconhecida (0.0.0) e sigo (a assinatura da release nova já foi validada). O update reescreve o marcador ao final."
+  INSTALLED_RELEASE_IDENTITY=$'0.0.0\t'
+fi
 IFS=$'\t' read -r INSTALLED_RELEASE_VERSION INSTALLED_RELEASE_DIGEST <<< "$INSTALLED_RELEASE_IDENTITY"
 # prev-version pro report honesto no rollback (o TX_DIR ja existe desde a preparacao).
 printf '%s\n' "$INSTALLED_RELEASE_VERSION" > "$TX_DIR/prev-version" 2>/dev/null || true
@@ -1784,7 +1830,12 @@ release_identity_acceptable "$version" "$RELEASE_MANIFEST_SHA256" "$INSTALLED_RE
 
 TARBALL="$(mktemp "${TMPDIR:-/tmp}/leon-package.XXXXXX.tar.gz")"
 say "baixando pacote para transacao $TX_ID"
-if ! HTTP_CODE="$(curl_common -sS --max-filesize "$base_bytes" --retry 3 --retry-delay 2 --retry-connrefused \
+# 02/set: pacote-base é o download SEM espelho (conteúdo pago só na central), então é o que MAIS
+# precisa insistir num soluço momentâneo da central. --retry-all-errors faz o curl repetir sozinho
+# em 5xx/429; --connect-timeout 20 evita pendurar. O [ "$HTTP_CODE" = "200" ] final segue fatal:
+# depois de o curl já ter insistido, um código != 200 aqui é recusa REAL (ex: 403 licença) — aí sim
+# avisar e parar é o certo (não é soluço, é a central dizendo não).
+if ! HTTP_CODE="$(curl_common -sS --max-filesize "$base_bytes" --retry 4 --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL --connect-timeout 20 \
     --max-time 180 -w '%{http_code}' -o "$TARBALL" \
     "$CENTRAL/download-codex?email=$EMAIL_ENC")"; then
   fatal "a internet falhou durante o download; nada foi trocado."
@@ -2089,8 +2140,20 @@ printf '%s\n' "$BRIDGE_SHA" > "$TX_DIR/bridge-sha256"
 
 # O modelo e a sessão persistente são provados no stage, com cópia efêmera e
 # segura da autenticação. Falha de acesso ao modelo nunca cai para outro modelo.
-run_candidate_model_smoke "$STAGE" "$TX_DIR" \
-  || fatal "o app-server não obteve duas respostas persistentes do modelo ${CODEX_MODEL_EFETIVO:-gpt-5.6-sol}; runtime preservado. Rode o instalador para revisar login e acesso ao modelo."
+#
+# 02/set (caso LEON 99 + decisão do dono): este smoke era FATAL — login do modelo
+# vencido (ou soluço momentâneo da OpenAI) CANCELAVA o /atualiza inteiro, mesmo com
+# a versão nova perfeita e o robô rodando bem antes. Trava clientes na versão velha
+# à toa, e login vencido precisa ser renovado de qualquer jeito (atualizando ou não).
+# Agora é AVISO, não veto: se o modelo não responde, marca a pendência e SEGUE o update;
+# o cliente recebe as correções e um aviso forte pra renovar o login no fim (pós-sucesso).
+# Os DEMAIS smokes (sintaxe, peças obrigatórias, Codex-only) continuam FATAIS — só o
+# gate de LOGIN do modelo deixou de bloquear, porque não é sobre a release ser boa.
+SMOKE_MODELO_OK=1
+if ! run_candidate_model_smoke "$STAGE" "$TX_DIR"; then
+  SMOKE_MODELO_OK=0
+  say "⚠️ smoke do modelo NÃO passou (login/${CODEX_MODEL_EFETIVO:-gpt-5.6-sol} indisponível) — NÃO é fatal: sigo o update e aviso o dono pra renovar o login."
+fi
 
 # A copia que o cron executa fica fora do runtime que sera trocado.
 cp -- "$SCRIPT_PATH" "$TX_DIR/finalize.sh"
@@ -2276,6 +2339,21 @@ if ! pgrep -x cron >/dev/null 2>&1 && ! pgrep -x crond >/dev/null 2>&1 \
   notify_from_runtime "$INSTALL_DIR" "⚠️ Me atualizei, mas o agendador da tua VPS (o cron) esta parado e nao consegui religar sozinho — sem ele o backup diario e a rede de seguranca nao rodam. Me chama que eu te passo como destravar (e 1 comando)." "$THREAD_ARG" "$CHAT_ARG" || true
 else
   rm -f "$INSTALL_DIR/.cron-morto.json" 2>/dev/null || true
+fi
+# 3a) AVISO DE LOGIN DO MODELO (02/set): o smoke do modelo virou aviso (não veto).
+# Se ele não passou lá na FASE 4, o update seguiu e chegou até aqui (versão nova no ar),
+# mas o robô pode não conseguir responder ao cliente até o login ser renovado. Avisa CLARO,
+# best-effort. A mensagem é AUTOSSUFICIENTE (Fable): se o login venceu o robô fica mudo e o
+# cliente não pode perguntar como — então já aponta o caminho concreto (a página de instalação,
+# que o cliente recebeu no e-mail; rodar o comando de novo refaz SÓ o login, sem quebrar nada).
+if [ "${SMOKE_MODELO_OK:-1}" = "0" ]; then
+  # Rastro em disco (ademais do aviso): o /status e o raio-x da frota leem isso pra
+  # enxergar login vencido DEPOIS do update, nao so no instante. Apagado no else quando
+  # o smoke passa. Leitor no bridge (/status) le {visto_em,modelo}.
+  printf '{"visto_em":%s,"modelo":"%s"}\n' "$(date +%s)" "${CODEX_MODEL_EFETIVO:-gpt-5.6-sol}" > "$INSTALL_DIR/.login-modelo-vencido.json" 2>/dev/null || true
+  notify_from_runtime "$INSTALL_DIR" "✅ Me atualizei pra última versão e as correções já estão no ar! Só um aviso importante: não consegui confirmar o acesso ao modelo de IA agora — o mais provável é que teu login do ChatGPT tenha vencido. A solução é rápida e SEM terminal: me manda /login aqui no Telegram que eu te passo um link pra reconectar (você entra no ChatGPT e autoriza, leva 1 min). Nada seu se perde, é só reconectar. (Se preferir, dá pra refazer pela página de instalação do teu e-mail também, mas o /login aqui é mais simples.)" "$THREAD_ARG" "$CHAT_ARG" || true
+else
+  rm -f "$INSTALL_DIR/.login-modelo-vencido.json" 2>/dev/null || true
 fi
 # 3b) MODELO DE AUDIO NATIVO (25/08, caso Leticia): casa instalada antes do fix
 # nao tem o modelo whisper — o 1o audio do cliente dispara download de 464MB DENTRO
