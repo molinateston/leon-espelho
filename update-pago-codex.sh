@@ -234,18 +234,6 @@ TEST_MODE="${LEON_UPDATE_TEST_MODE:-0}"
 FINALIZE_MODE=0
 [ "${1:-}" = "--finalize" ] && FINALIZE_MODE=1
 
-# Bash le scripts por offset. Uma copia fora do runtime impede que o rename da
-# instalacao altere o arquivo que esta sendo executado.
-if [ "$FINALIZE_MODE" -eq 0 ] && [ -z "${LEON_UPDATE_BLINDADO:-}" ]; then
-  SAFE_COPY="$(mktemp "${TMPDIR:-/tmp}/leon-update.XXXXXX")"
-  cp -- "$SCRIPT_PATH" "$SAFE_COPY"
-  chmod 0700 "$SAFE_COPY"
-  export LEON_UPDATE_BLINDADO=1
-  export LEON_INSTALL_DIR="${LEON_INSTALL_DIR:-$SELF}"
-  export LEON_UPDATE_COPIA="$SAFE_COPY"
-  exec /usr/bin/env bash "$SAFE_COPY" "$@"
-fi
-
 INSTALL_DIR="${LEON_INSTALL_DIR:-$SELF}"
 SERVICE="${LEON_SERVICE:-leon-agente.service}"
 SYSTEMCTL=/bin/systemctl
@@ -358,6 +346,171 @@ if [ "${LEON_TEST_RELEASE_HELPERS_ONLY:-0}" = "1" ]; then
   esac
   exit $?
 fi
+
+# Funcoes de rede/aviso movidas pra cima (03/09): o STAGE0 abaixo precisa delas
+# antes do corpo. Sao puras: dependem so de TEST_MODE, CURL_BIN e safe_env_value.
+curl_common() {
+  if [ "$TEST_MODE" = "1" ]; then
+    "$CURL_BIN" "$@"
+  else
+    "$CURL_BIN" --proto '=https' --tlsv1.2 "$@"
+  fi
+}
+
+telegram_api_get_file() {
+  local token="$1" endpoint="$2" output="$3" timeout="${4:-15}"
+  printf %s "$token" | grep -qE '^[0-9]+:[A-Za-z0-9_-]{20,}$' || return 2
+  case "$endpoint" in getMe) ;; *) return 2 ;; esac
+  printf 'url = "https://api.telegram.org/bot%s/%s"\n' "$token" "$endpoint" \
+    | curl_common -fsS --max-time "$timeout" --config - --output "$output" 2>/dev/null
+}
+
+telegram_api_send_message() {
+  local token="$1" chat="$2" text="$3" thread="${4:-}"
+  printf %s "$token" | grep -qE '^[0-9]+:[A-Za-z0-9_-]{20,}$' || return 2
+  printf %s "$chat" | grep -qE '^-?[1-9][0-9]*$' || return 2
+  [ -z "$thread" ] || printf %s "$thread" | grep -qE '^[1-9][0-9]*$' || return 2
+  if [ -n "$thread" ]; then
+    printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$token" \
+      | curl_common -sS --max-time 20 --config - \
+          --data-urlencode "chat_id=$chat" \
+          --data-urlencode "message_thread_id=$thread" \
+          --data-urlencode "text=$text" >/dev/null 2>&1
+  else
+    printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$token" \
+      | curl_common -sS --max-time 20 --config - \
+          --data-urlencode "chat_id=$chat" \
+          --data-urlencode "text=$text" >/dev/null 2>&1
+  fi
+}
+
+notify_from_runtime() {
+  local runtime="$1" text="$2" thread="${3:-}" chat_override="${4:-}" env_file token chat
+  env_file="$runtime/.env"
+  token="$(safe_env_value "$env_file" TELEGRAM_BOT_TOKEN 2>/dev/null)" || return 0
+  chat="${chat_override:-$(safe_env_value "$env_file" OWNER_CHAT_ID 2>/dev/null)}"
+  [ -n "$token" ] && [ -n "$chat" ] || return 0
+  telegram_api_send_message "$token" "$chat" "$text" "$thread" || true
+}
+
+# --- LEON-STAGE0-BEGIN (contrato: esta string nunca sai do arquivo) -----------
+# STAGE0 (03/09/2026): o arquivo instalado no cliente e este mesmo, mas o CORPO
+# abaixo nunca executa localmente. Este head baixa o atualizador FRESCO e
+# assinado da central e faz exec nele. Efeito: bug no atualizador se conserta
+# na central e a frota se cura no proximo /atualiza ou madrugada, zero toque.
+# (Era o "salto blindado": copiava a si mesmo pra /tmp e fazia exec. Agora o
+# exec e no fresco. Mesmo PID, argv e env: bridge e vigia nao percebem.)
+# Pula: --finalize (cron, offline por desenho), LEON_UPDATE_BLINDADO=1 (ja e o
+# fresco rodando) e helpers-only (build/deploy, sem rede).
+# O head e a UNICA peca que nao se autocura: por isso e minimo, leniente com o
+# manifesto (so assinatura, chave, kind/canal/versao e o artefato do updater;
+# Codex/Node/chaves novas ficam pro corpo fresco decidir) e congelado por pin
+# no deploy (a regiao do pin vai da linha 1 ate LEON-STAGE0-END, inclusive as
+# funcoes que ele usa: bump de Node/helpers = bump de pin, de proposito).
+s0_verify_manifest() {  # leniente: aceita campos/artefatos futuros; exige so o que o head precisa
+  local manifest="$1" signature="$2" public_key="$3" metadata="$4"
+  write_release_public_key "$public_key" || return 1
+  openssl pkeyutl -verify -rawin -pubin -inkey "$public_key" \
+    -in "$manifest" -sigfile "$signature" >/dev/null 2>&1 || return 1
+  "$PYTHON_BIN" - "$manifest" "$LEON_RELEASE_TRUST_FINGERPRINT" > "$metadata" <<'PY'
+import json,re,sys
+manifest,fingerprint=sys.argv[1:]
+try: data=json.load(open(manifest,encoding="utf-8"))
+except Exception: raise SystemExit(1)
+if not isinstance(data,dict): raise SystemExit(1)
+if data.get("schema")!=2 or data.get("kind")!="leon-codex-release" or data.get("channel")!="stable": raise SystemExit(1)
+if data.get("keyFingerprint")!=fingerprint: raise SystemExit(1)
+version=str(data.get("version",""))
+if not re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)",version): raise SystemExit(1)
+item=(data.get("artifacts") or {}).get("updater")
+if not isinstance(item,dict): raise SystemExit(1)
+if item.get("url")!="/update-pago-codex.sh" or item.get("licensed") is not False: raise SystemExit(1)
+if not re.fullmatch(r"[0-9a-f]{64}",str(item.get("sha256",""))): raise SystemExit(1)
+b=item.get("bytes")
+if isinstance(b,bool) or not isinstance(b,int) or not 1<=b<=536_870_912: raise SystemExit(1)
+print("version="+version); print("updater_sha256="+item["sha256"]); print("updater_bytes=%d"%b); print("updater_url="+item["url"])
+PY
+}
+if [ "$FINALIZE_MODE" -eq 0 ] && [ -z "${LEON_UPDATE_BLINDADO:-}" ] \
+   && [ "${LEON_TEST_RELEASE_HELPERS_ONLY:-0}" != "1" ]; then
+  S0_CHAT="${1:-}"; S0_THREAD="${2:-}"
+  S0_MAN=""; S0_SIG=""; S0_PUB=""; S0_META=""; S0_CAND=""
+  s0_log() { printf '%s [stage0] %s\n' "$(date '+%F %T')" "$*" >> "$INSTALL_DIR/upgrade.log" 2>/dev/null || true; }
+  s0_clean() { rm -f -- "$S0_MAN" "$S0_SIG" "$S0_PUB" "$S0_META" "$S0_CAND" 2>/dev/null || true; }
+  # kill/sinal no meio do download nao deixa sobra (exec bem-sucedido NAO dispara EXIT)
+  trap 's0_clean' EXIT
+  trap 's0_clean; exit 130' INT TERM   # sem o exit, o handler roda e o script SEGUE (diagnostico errado)
+  s0_die() {  # nunca deixa o cliente pior: apaga so os proprios temporarios e sai 1
+    s0_log "⚠️ $1"
+    s0_clean
+    # madrugada (update-auto, sem pedido humano): so log, sem mensagem repetida ao dono
+    if [ -n "$S0_CHAT" ] || [ -z "${LEON_UPDATE_AUTO:-}" ]; then
+      notify_from_runtime "$INSTALL_DIR" "⚠️ $2 Continuo no ar na versão de antes; nada foi trocado." "$S0_THREAD" "$S0_CHAT" || true
+    fi
+    exit 1
+  }
+  # shim: verify_signed_artifact chama fatal; o corpo redefine fatal mais abaixo.
+  fatal() { s0_die "$1" "A atualização baixada não bateu com a assinatura da central."; }
+  [ -f "$INSTALL_DIR/.env" ] || s0_die "sem .env em $INSTALL_DIR" "não achei a configuração da instalação."
+  # safe_env_value = gate de permissao/formato (0600, chave unica); o valor cru pode
+  # vir com aspas ou comentario (.env editado a mao): normaliza como o env_get_from.
+  S0_RAW="$(safe_env_value "$INSTALL_DIR/.env" LEON_LICENSE_CENTRAL 2>/dev/null)" || S0_RAW="__S0_ENV_INVALIDO__"
+  if [ "$S0_RAW" = "__S0_ENV_INVALIDO__" ]; then
+    grep -qE '^LEON_LICENSE_CENTRAL=' "$INSTALL_DIR/.env" 2>/dev/null \
+      && s0_die ".env fora do padrão (permissão não é 0600, dono errado ou chave repetida)" "a configuração da instalação está com permissão ou formato errado." \
+      || s0_die "LEON_LICENSE_CENTRAL ausente no .env" "a configuração da instalação não diz qual é a central."
+  fi
+  S0_CENTRAL="$(printf '%s' "$S0_RAW" | sed 's/[[:space:]]*#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//')"
+  case "$S0_CENTRAL" in
+    https://*) ;;
+    "") s0_die "LEON_LICENSE_CENTRAL vazio no .env" "a configuração da instalação está com o endereço da central em branco." ;;
+    *) s0_die "LEON_LICENSE_CENTRAL não é https ($S0_CENTRAL)" "o endereço da central na configuração não é https." ;;
+  esac
+  S0_MAN="$(mktemp "${TMPDIR:-/tmp}/leon-stage0.XXXXXX.json")"  || s0_die "mktemp falhou (TMPDIR cheio ou inexistente?)" "não consegui criar arquivo temporário (disco cheio?)."
+  S0_SIG="$(mktemp "${TMPDIR:-/tmp}/leon-stage0.XXXXXX.sig")"   || s0_die "mktemp falhou" "não consegui criar arquivo temporário (disco cheio?)."
+  S0_PUB="$(mktemp "${TMPDIR:-/tmp}/leon-stage0.XXXXXX.pem")"   || s0_die "mktemp falhou" "não consegui criar arquivo temporário (disco cheio?)."
+  S0_META="$(mktemp "${TMPDIR:-/tmp}/leon-stage0.XXXXXX.env")"  || s0_die "mktemp falhou" "não consegui criar arquivo temporário (disco cheio?)."
+  s0_log "buscando o atualizador assinado em $S0_CENTRAL"
+  curl_common -fsSL --max-filesize 524288 --retry 3 --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL \
+      --connect-timeout 20 --max-time 60 "$S0_CENTRAL/release-manifest.json" -o "$S0_MAN" \
+   && curl_common -fsSL --max-filesize 64 --retry 3 --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL \
+      --connect-timeout 20 --max-time 60 "$S0_CENTRAL/release-manifest.sig" -o "$S0_SIG" \
+   || s0_die "download do manifesto falhou (rede/central)" "não consegui baixar a atualização agora (a central não respondeu). Tente /atualiza mais tarde."
+  validate_download_file "$S0_MAN" 524288 && validate_download_file "$S0_SIG" 64 64 \
+   || s0_die "manifesto/assinatura fora do contrato de transporte" "a atualização servida veio fora do padrão."
+  s0_verify_manifest "$S0_MAN" "$S0_SIG" "$S0_PUB" "$S0_META" \
+   || s0_die "assinatura inválida ou manifesto sem o artefato do atualizador" "a atualização servida não passou na conferência de assinatura."
+  # shellcheck disable=SC1090
+  . "$S0_META"   # version, updater_sha256, updater_bytes, updater_url (url fixa, ja validada)
+  S0_MAN_SHA="$(sha256sum "$S0_MAN" | awk '{print $1}')" || s0_die "sha256sum do manifesto falhou" "não consegui conferir a atualização."
+  S0_ID="$(read_installed_release_identity "$INSTALL_DIR" 2>/dev/null)" || S0_ID=$'0.0.0\t'
+  IFS=$'\t' read -r S0_INST_VER S0_INST_DIG <<< "$S0_ID"
+  release_identity_acceptable "$version" "$S0_MAN_SHA" "${S0_INST_VER:-0.0.0}" "${S0_INST_DIG:-}" \
+   || s0_die "central serve $version, instalada ${S0_INST_VER:-?} (digest ${S0_INST_DIG:-sem}): recusado por downgrade/replay" "a central está servindo uma versão que não posso aplicar por cima da instalada (mais antiga, ou a mesma com assinatura diferente)."
+  # nome casa o cleanup do corpo (leon-update.*) e NAO contem 'update-pago.sh'.
+  S0_CAND="$(mktemp "${TMPDIR:-/tmp}/leon-update.XXXXXX")" || s0_die "mktemp falhou" "não consegui criar arquivo temporário (disco cheio?)."
+  curl_common -fsSL --max-filesize "$((updater_bytes + 1))" --retry 3 --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL \
+      --connect-timeout 20 --max-time 180 "$S0_CENTRAL$updater_url" -o "$S0_CAND" \
+   || s0_die "download do atualizador falhou (rede/central)" "não consegui baixar a atualização agora. Tente /atualiza mais tarde."
+  verify_signed_artifact "$S0_CAND" "$updater_sha256" "$updater_bytes" "atualizador"
+  # literal partido de proposito: o inteiro nunca pode existir neste arquivo.
+  S0_FLAG="--dangerously-bypass-approvals-and-"'sandbox'
+  if LC_ALL=C grep -q -- "$S0_FLAG" "$S0_CAND"; then
+    s0_die "atualizador servido carrega flag proibida" "a atualização servida veio com defeito e eu barrei a troca."
+  fi
+  grep -q 'verify_release_manifest' "$S0_CAND" && grep -q 'LEON-STAGE0-BEGIN' "$S0_CAND" \
+   || s0_die "atualizador servido não tem stage0 (release anterior a esta?)" "a central está servindo um atualizador antigo; recusei por segurança."
+  bash -n "$S0_CAND" 2>/dev/null \
+   || s0_die "atualizador servido falhou no teste de sintaxe" "a versão nova veio com defeito e eu barrei a troca."
+  chmod 0700 "$S0_CAND" || s0_die "chmod do atualizador falhou" "não consegui preparar a atualização."
+  rm -f -- "$S0_MAN" "$S0_SIG" "$S0_PUB" "$S0_META" 2>/dev/null || true
+  S0_MAN=""; S0_SIG=""; S0_PUB=""; S0_META=""
+  trap - EXIT INT TERM
+  s0_log "atualizador $version (${updater_sha256:0:12}) conferido: assinatura, sha, tamanho, sintaxe; passando o comando"
+  export LEON_INSTALL_DIR="$INSTALL_DIR" LEON_UPDATE_BLINDADO=1 LEON_UPDATE_COPIA="$S0_CAND"
+  exec /usr/bin/env bash "$S0_CAND" "$@"
+fi
+# --- LEON-STAGE0-END ----------------------------------------------------------
 
 validate_runtime_roots() {
   local require_exists="${1:-0}"
@@ -1165,50 +1318,6 @@ if sww is not None and sww!={"network_access": True}: raise SystemExit(1)
 PY
 }
 
-curl_common() {
-  if [ "$TEST_MODE" = "1" ]; then
-    "$CURL_BIN" "$@"
-  else
-    "$CURL_BIN" --proto '=https' --tlsv1.2 "$@"
-  fi
-}
-
-telegram_api_get_file() {
-  local token="$1" endpoint="$2" output="$3" timeout="${4:-15}"
-  printf %s "$token" | grep -qE '^[0-9]+:[A-Za-z0-9_-]{20,}$' || return 2
-  case "$endpoint" in getMe) ;; *) return 2 ;; esac
-  printf 'url = "https://api.telegram.org/bot%s/%s"\n' "$token" "$endpoint" \
-    | curl_common -fsS --max-time "$timeout" --config - --output "$output" 2>/dev/null
-}
-
-telegram_api_send_message() {
-  local token="$1" chat="$2" text="$3" thread="${4:-}"
-  printf %s "$token" | grep -qE '^[0-9]+:[A-Za-z0-9_-]{20,}$' || return 2
-  printf %s "$chat" | grep -qE '^-?[1-9][0-9]*$' || return 2
-  [ -z "$thread" ] || printf %s "$thread" | grep -qE '^[1-9][0-9]*$' || return 2
-  if [ -n "$thread" ]; then
-    printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$token" \
-      | curl_common -sS --max-time 20 --config - \
-          --data-urlencode "chat_id=$chat" \
-          --data-urlencode "message_thread_id=$thread" \
-          --data-urlencode "text=$text" >/dev/null 2>&1
-  else
-    printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$token" \
-      | curl_common -sS --max-time 20 --config - \
-          --data-urlencode "chat_id=$chat" \
-          --data-urlencode "text=$text" >/dev/null 2>&1
-  fi
-}
-
-notify_from_runtime() {
-  local runtime="$1" text="$2" thread="${3:-}" chat_override="${4:-}" env_file token chat
-  env_file="$runtime/.env"
-  token="$(safe_env_value "$env_file" TELEGRAM_BOT_TOKEN 2>/dev/null)" || return 0
-  chat="${chat_override:-$(safe_env_value "$env_file" OWNER_CHAT_ID 2>/dev/null)}"
-  [ -n "$token" ] && [ -n "$chat" ] || return 0
-  telegram_api_send_message "$token" "$chat" "$text" "$thread" || true
-}
-
 tx_read() {
   local tx="$1" name="$2"
   cat "$tx/$name"
@@ -1641,7 +1750,10 @@ cleanup_main() {
         restore_crontab_from_tx "$TX_DIR" >/dev/null 2>&1 || true
       fi
     fi
-    notify_from_runtime "$INSTALL_DIR" "⚠️ $FAIL_MESSAGE" "$THREAD_ARG" "$CHAT_ARG"
+    # madrugada (update-auto, sem pedido humano): so log, sem mensagem repetida ao dono (03/09)
+    if [ -n "$CHAT_ARG" ] || [ -z "${LEON_UPDATE_AUTO:-}" ]; then
+      notify_from_runtime "$INSTALL_DIR" "⚠️ $FAIL_MESSAGE" "$THREAD_ARG" "$CHAT_ARG"
+    fi
   fi
   return "$status"
 }
