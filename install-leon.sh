@@ -681,16 +681,12 @@ codex_login_unificado() {
     return 0
   fi
 
-  # 3) Sem auth utilizavel E sem terminal interativo (reinstalacao via curl|bash):
-  #    NAO dispara device-auth (nao completaria e pode danificar estado). Aborta
-  #    sem tocar em auth; o dono instala num terminal, ou usa /login pelo Telegram.
-  if [ ! -t 0 ] || [ ! -t 1 ]; then
-    echo "ERRO: Codex sem sessao e sem terminal interativo para o login. Nenhum runtime LEON foi trocado." >&2
-    echo "      Rode a instalacao num terminal interativo, ou use o /login pelo Telegram apos instalar." >&2
-    return 1
-  fi
-
-  # 4) Instalacao NOVA com tty: device-auth interativo normal.
+  # 3) Sem auth utilizavel: device-auth. Ele NAO precisa de tty — imprime a URL + o
+  #    codigo de uso unico no stdout, o dono autoriza no navegador e o CLI faz polling
+  #    ate completar. Isso e o que faz a instalacao em UM passo (curl|bash) funcionar.
+  #    (03/09: a guarda de tty daqui abortava o curl|bash e quebrou o um-passo; provado
+  #    no 99 que device-auth imprime a URL sem tty. O passo 2 acima ja protege um
+  #    auth.json valido; aqui nao ha auth util, entao device-auth e seguro.)
   echo ""
   echo "========================================"
   echo "  LOGIN DO CODEX"
