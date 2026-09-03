@@ -740,11 +740,11 @@ provar_modelo_codex() {
     echo "ERRO: o modelo $m nao respondeu (codigo $rc)." >&2
     tail -n 5 "$saida" >&2 || true
     rm -f -- "$saida" "$ultima"
-    echo "abortando: sem modelo respondendo o LEON subiria mudo. suporte: https://wa.me/5511961562217" >&2
+    echo "abortando: sem modelo respondendo o LEON subiria mudo. suporte: https://wa.me/5511988890934" >&2
     return 1
   done
   echo "ERRO: nenhum modelo (${candidatos}) esta disponivel nesta conta ChatGPT." >&2
-  echo "abortando. suporte: https://wa.me/5511961562217" >&2
+  echo "abortando. suporte: https://wa.me/5511988890934" >&2
   return 1
 }
 
@@ -837,7 +837,7 @@ injetar_handoff_update_verdict() {
     return 0
   fi
   tmp="$vigia.leon-new"
-  python3 - "$vigia" "$tmp" <<'PY' || { rm -f -- "$tmp"; echo "ERRO: nao consegui gravar o handoff do /atualiza no vigia. suporte: https://wa.me/5511961562217" >&2; return 1; }
+  python3 - "$vigia" "$tmp" <<'PY' || { rm -f -- "$tmp"; echo "ERRO: nao consegui gravar o handoff do /atualiza no vigia. suporte: https://wa.me/5511988890934" >&2; return 1; }
 import os, re, sys
 src, dst = sys.argv[1:]
 text = open(src, encoding="utf-8").read()
@@ -896,7 +896,7 @@ os.chmod(dst, os.stat(src).st_mode & 0o777)
 PY
   if ! bash -n "$tmp" 2>/dev/null; then
     rm -f -- "$tmp"
-    echo "ERRO: o vigia com o handoff nao compila; original preservado. suporte: https://wa.me/5511961562217" >&2
+    echo "ERRO: o vigia com o handoff nao compila; original preservado. suporte: https://wa.me/5511988890934" >&2
     return 1
   fi
   mv -f -- "$tmp" "$vigia"
@@ -981,7 +981,7 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
   # runuser (util-linux) no lugar de sudo -u: sudoers alheio na VPS do cliente
   # travou o pulo root>leon (22/08). runuser nao consulta sudoers.
   command -v runuser >/dev/null 2>&1 \
-    || { echo "ERRO: 'runuser' (util-linux) nao existe nesta VPS. suporte: https://wa.me/5511961562217" >&2; exit 1; }
+    || { echo "ERRO: 'runuser' (util-linux) nao existe nesta VPS. suporte: https://wa.me/5511988890934" >&2; exit 1; }
 
   # Para servico antigo (instalacao anterior). Tem que parar ANTES da captura do
   # Telegram: dois consumidores de getUpdates no mesmo bot se derrubam.
@@ -1013,7 +1013,7 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
     dbus-user-session locales sudo >/dev/null 2>/tmp/apt-base.err \
     || { echo "ERRO: pacotes base do sistema nao instalaram." >&2
          [ -s /tmp/apt-base.err ] && echo "detalhe apt: $(tail -n 3 /tmp/apt-base.err)" >&2
-         echo "abortando. suporte: https://wa.me/5511961562217" >&2; exit 1; }
+         echo "abortando. suporte: https://wa.me/5511988890934" >&2; exit 1; }
   # CRON ROBUSTO (fix bug-de-nascenca 01/09): o `|| true` cego deixava a casa nascer
   # com o cron MORTO sem ninguem saber — e o /atualiza (que roda pelo cron) travava
   # eterno. Agora liga de verdade, desmascara, e CONFERE. O motor reserva (leon-vigia.timer,
@@ -1066,7 +1066,7 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
     echo "ERRO: Node 22 nao instalou em /usr/bin/node nesta VPS." >&2
     [ -s /tmp/nodesource.err ] && echo "detalhe NodeSource: $(tail -n 3 /tmp/nodesource.err)" >&2
     [ -s /tmp/apt-nodejs.err ] && echo "detalhe apt: $(tail -n 3 /tmp/apt-nodejs.err)" >&2
-    echo "abortando. suporte: https://wa.me/5511961562217" >&2
+    echo "abortando. suporte: https://wa.me/5511988890934" >&2
     exit 1
   fi
   echo "   node do sistema $(/usr/bin/node -v) em /usr/bin/node"
@@ -1087,7 +1087,7 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
     if ! claude_cli_ok; then
       echo "ERRO: Claude CLI nao instalou nesta VPS." >&2
       [ -s /tmp/npm-claude.err ] && echo "detalhe npm: $(tail -n 3 /tmp/npm-claude.err)" >&2
-      echo "abortando. suporte: https://wa.me/5511961562217" >&2
+      echo "abortando. suporte: https://wa.me/5511988890934" >&2
       exit 1
     fi
     echo "   claude $(PATH="$SYS_PATH" claude --version 2>/dev/null)"
@@ -1178,7 +1178,7 @@ EOF
   # de fabrica): falha = ERRO + suporte, nunca "opcional" em silencio. Cada bloco
   # e idempotente: so refaz o que nao existe.
   echo ">> instalando voz local gratis (Piper TTS · pt_BR)..."
-  como_leon bash -s <<'PIPER_SETUP' || { echo "ERRO: a voz local (Piper TTS) nao instalou. suporte: https://wa.me/5511961562217" >&2; exit 1; }
+  como_leon bash -s <<'PIPER_SETUP' || { echo "ERRO: a voz local (Piper TTS) nao instalou. suporte: https://wa.me/5511988890934" >&2; exit 1; }
 set -e
 mkdir -p ~/.leon/piper-venv ~/.leon/voices/piper
 if [ ! -x ~/.leon/piper-venv/bin/piper ]; then
@@ -1194,7 +1194,7 @@ done
 PIPER_SETUP
 
   echo ">> instalando voz nuvem gratis (Edge TTS · Antonio/Francisca)..."
-  como_leon bash -s <<'EDGE_SETUP' || { echo "ERRO: a voz nuvem (Edge TTS) nao instalou. suporte: https://wa.me/5511961562217" >&2; exit 1; }
+  como_leon bash -s <<'EDGE_SETUP' || { echo "ERRO: a voz nuvem (Edge TTS) nao instalou. suporte: https://wa.me/5511988890934" >&2; exit 1; }
 set -e
 mkdir -p ~/.leon/edgetts-venv
 if [ ! -x ~/.leon/edgetts-venv/bin/edge-tts ]; then
@@ -1204,7 +1204,7 @@ fi
 EDGE_SETUP
 
   echo ">> instalando transcricao de audio local (faster-whisper)..."
-  como_leon bash -s <<'WHISPER_SETUP' || { echo "ERRO: a transcricao de audio (faster-whisper) nao instalou. suporte: https://wa.me/5511961562217" >&2; exit 1; }
+  como_leon bash -s <<'WHISPER_SETUP' || { echo "ERRO: a transcricao de audio (faster-whisper) nao instalou. suporte: https://wa.me/5511988890934" >&2; exit 1; }
 set -e
 mkdir -p ~/.leon/whisper-venv
 if [ ! -x ~/.leon/whisper-venv/bin/python3 ] || ! ~/.leon/whisper-venv/bin/python3 -c "import faster_whisper" 2>/dev/null; then
@@ -1234,7 +1234,7 @@ WHISPER_SETUP
       if ! como_leon python3 -c 'import tomli' >/dev/null 2>&1; then
         echo "ERRO: o python do usuario '$LEON_USER' ficou sem tomllib/tomli; o atualizador nao conseguiria ler o config.toml." >&2
         [ -s /tmp/pip-tomli.err ] && echo "detalhe pip: $(tail -n 3 /tmp/pip-tomli.err)" >&2
-        echo "abortando. suporte: https://wa.me/5511961562217" >&2
+        echo "abortando. suporte: https://wa.me/5511988890934" >&2
         exit 1
       fi
     fi
@@ -1293,7 +1293,7 @@ religar_servico_antigo_se_abortar() {
     if sudo -n /bin/systemctl start leon-agente.service >/dev/null 2>&1; then
       echo ">> instalacao abortada; o LEON antigo foi religado e continua no ar." >&2
     else
-      echo ">> instalacao abortada e nao consegui religar o LEON antigo sozinho: rode 'sudo systemctl start leon-agente.service' como root. suporte: https://wa.me/5511961562217" >&2
+      echo ">> instalacao abortada e nao consegui religar o LEON antigo sozinho: rode 'sudo systemctl start leon-agente.service' como root. suporte: https://wa.me/5511988890934" >&2
     fi
   fi
   exit "$rc"
@@ -1329,9 +1329,9 @@ if [ "$MOCK_MODE" != "1" ]; then
   if [ "$LEON_ENGINE" = codex ]; then
     echo ">> preparando runtime dedicado do Codex (Node $LEON_NODE_VERSION + Codex CLI $LEON_CODEX_CLI_VERSION)..."
     ensure_node_runtime \
-      || { echo "ERRO: o Node dedicado $LEON_NODE_VERSION nao ficou pronto. suporte: https://wa.me/5511961562217" >&2; exit 1; }
+      || { echo "ERRO: o Node dedicado $LEON_NODE_VERSION nao ficou pronto. suporte: https://wa.me/5511988890934" >&2; exit 1; }
     ensure_codex_cli \
-      || { echo "ERRO: o Codex CLI $LEON_CODEX_CLI_VERSION nao ficou pronto. suporte: https://wa.me/5511961562217" >&2; exit 1; }
+      || { echo "ERRO: o Codex CLI $LEON_CODEX_CLI_VERSION nao ficou pronto. suporte: https://wa.me/5511988890934" >&2; exit 1; }
   else
     [ -x /usr/bin/node ] || { echo "ERRO: node do sistema faltando (/usr/bin/node)." >&2; exit 1; }
     command -v claude >/dev/null || { echo "ERRO: claude CLI faltando." >&2; exit 1; }
@@ -1347,7 +1347,7 @@ fi
 if [ "$MOCK_MODE" != "1" ]; then
   if [ "$LEON_ENGINE" = codex ]; then
     mkdir -p "$LEON_CODEX_HOME" && chmod 0700 "$LEON_CODEX_HOME"
-    codex_login_unificado || { echo "ERRO: login do Codex falhou. suporte: https://wa.me/5511961562217" >&2; exit 1; }
+    codex_login_unificado || { echo "ERRO: login do Codex falhou. suporte: https://wa.me/5511988890934" >&2; exit 1; }
     provar_modelo_codex || exit 1
     echo ""
   elif [ ! -d "$HOME/.claude" ] || [ ! -f "$HOME/.claude/.credentials.json" ]; then
@@ -1490,7 +1490,7 @@ PY
     echo "  · email diferente do que voce usou na compra (Cakto/Hubla)" >&2
     echo "  · compra ainda nao processada (aguarde 1min e tente de novo)" >&2
     echo "  · reembolso/cancelamento (licenca bloqueada)" >&2
-    echo "suporte: https://wa.me/5511961562217" >&2
+    echo "suporte: https://wa.me/5511988890934" >&2
     rm -f -- "$TARBALL"
     exit 1
   fi
@@ -1643,7 +1643,7 @@ if [ "$MOCK_MODE" != "1" ]; then
       echo "  · email diferente do que voce usou na compra (Cakto/Hubla)" >&2
       echo "  · compra ainda nao processada (aguarde 1min e tente de novo)" >&2
       echo "  · reembolso/cancelamento (licenca bloqueada)" >&2
-      echo "suporte: https://wa.me/5511961562217" >&2
+      echo "suporte: https://wa.me/5511988890934" >&2
       rm -f "$TARBALL"
       exit 1
     fi
@@ -2110,7 +2110,7 @@ if [ "$MOCK_MODE" != "1" ]; then
   if ! printf %s "$RESP" | grep -q '"ok":true'; then
     echo "ATENCAO: ativacao no central falhou. motor instalado mas nao ativou."
     echo "se for machine_mismatch: essa chave ja foi ativada em outra VPS."
-    echo "suporte: https://wa.me/5511961562217"
+    echo "suporte: https://wa.me/5511988890934"
   fi
 fi
 

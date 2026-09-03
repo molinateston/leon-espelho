@@ -16,7 +16,7 @@
 #  - motor: pergunta em português, sem jargão, com o padrão pronto no Enter.
 set -uo pipefail
 
-SUPORTE="https://wa.me/5511961562217"
+SUPORTE="https://wa.me/5511988890934"
 CENTRAL="${LEON_CENTRAL:-https://licenca.leonardomolina.com.br}"
 
 vermelho() { printf '\033[1;31m%s\033[0m\n' "$*"; }
