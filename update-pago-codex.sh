@@ -1178,10 +1178,13 @@ PY
 
 write_codex_config_candidate() {
   local destination="$1"
+  # Decisão do dono 04/09: mesmo modo do mestre; o isolamento por bubblewrap falha em
+  # Ubuntu 24.04 pra usuário comum e o agente não executa nada.
   cat > "$destination" <<EOF
 model = "${CODEX_MODEL_EFETIVO:-gpt-5.6-sol}"
 model_reasoning_effort = "high"
 preferred_auth_method = "chatgpt"
+sandbox_mode = "danger-full-access"
 approval_policy = "never"
 default_permissions = "leon"
 allow_login_shell = false
@@ -1192,8 +1195,10 @@ trust_level = "untrusted"
 [projects."$LEON_WORK_AREA"]
 trust_level = "trusted"
 
+# Seções abaixo ficam por compatibilidade de leitura; sob danger-full-access o Codex
+# NÃO monta sandbox e NÃO aplica estes filtros.
 [permissions.leon]
-description = "LEON: raiz negada e acesso somente a diretórios explícitos."
+description = "LEON: perfil herdado (inerte sob danger-full-access)."
 
 [permissions.leon.workspace_roots]
 "$LEON_WORK_AREA" = true
@@ -1206,8 +1211,6 @@ glob_scan_max_depth = 4
 ":root" = "deny"
 ":minimal" = "read"
 "$LEON_DATA_DIR/codex-cli" = "read"
-# 26/08: rede ligada exige DNS — sem estes dois em leitura, o resolv morre e a rede "ligada"
-# continua inútil (medido na auditoria: TCP pra IP direto passa, nome de domínio falha).
 "/etc/resolv.conf" = "read"
 "/etc/hosts" = "read"
 "$LEON_SKILLS_DIR" = "read"
@@ -1225,13 +1228,8 @@ glob_scan_max_depth = 4
 "keys/**" = "deny"
 
 [permissions.leon.network]
-# 26/08 (lei do dono): Vercel, Zernio e afins são APIs BÁSICAS DO USO — o agente precisa de
-# rede pros comandos dele (curl, CLIs de deploy). O cofre de credenciais só faz sentido com
-# isto ligado. Raiz negada e filtros de env seguem valendo.
 enabled = true
 
-# Knob OFICIAL do Codex: sandbox workspace-write bloqueia rede por padrão; sem esta seção,
-# o enabled acima não basta.
 [sandbox_workspace_write]
 network_access = true
 
@@ -1309,10 +1307,11 @@ profile=data.get("permissions",{}).get("leon",{})
 filesystem=profile.get("filesystem",{})
 if data.get("approval_policy")!="never" or data.get("default_permissions")!="leon": raise SystemExit(1)
 if filesystem.get(":root")!="deny" or filesystem.get(":minimal")!="read": raise SystemExit(1)
-if "sandbox_mode" in data: raise SystemExit(1)
-# 26/08 (lei do dono: APIs basicas do uso): rede LIGADA e permitida — mas SO ela.
-# sandbox_workspace_write aceito com exatamente {"network_access": true}; qualquer outra
-# chave nessa secao (writable_roots etc.) continua proibida — rede nao afrouxa filesystem.
+# Decisao do dono 04/09: mesmo modo do mestre. O unico sandbox_mode aceito e
+# danger-full-access; qualquer outro valor (ou a ausencia) reprova o candidato.
+if data.get("sandbox_mode")!="danger-full-access": raise SystemExit(1)
+# sandbox_workspace_write, se presente, aceito com exatamente {"network_access": true};
+# qualquer outra chave nessa secao (writable_roots etc.) continua proibida.
 sww=data.get("sandbox_workspace_write")
 if sww is not None and sww!={"network_access": True}: raise SystemExit(1)
 PY
@@ -1538,6 +1537,24 @@ PY
   rm -f -- "$out"
 }
 
+# Estado transitorio da unit: 'activating' (subindo) ou 'deactivating' (descendo).
+# Fail-safe por construcao: se o systemctl nao souber responder (fake de teste,
+# systemd velho, saida vazia), respondemos "nao esta em transicao" e o fluxo segue
+# igual ao de antes — endurecer nunca pode virar motivo novo de rollback.
+service_in_transition() {
+  local st
+  st="$(service_read show -p ActiveState --value "$SERVICE" 2>/dev/null || true)"
+  case "$st" in
+    activating|deactivating) return 0 ;;
+  esac
+  st="$(service_read show -p SubState --value "$SERVICE" 2>/dev/null || true)"
+  case "$st" in
+    start|start-pre|start-post|stop|stop-sigterm|stop-sigkill|stop-post|final-sigterm|final-sigkill|auto-restart)
+      return 0 ;;
+  esac
+  return 1
+}
+
 health_smoke() {
   local tx="$1" live expected expected_skills skills_path attempts stable_sleep pid1 pid2 i
   live="$(tx_read "$tx" live-path)"
@@ -1560,10 +1577,16 @@ health_smoke() {
   "$NODE_BIN" --check "$live/lib/onboarding.js" >/dev/null 2>&1 || return 1
   "$NODE_BIN" --check "$live/lib-motores/codex-appserver.cjs" >/dev/null 2>&1 || return 1
   "$NODE_BIN" --check "$live/workers/piper.js" >/dev/null 2>&1 || return 1
+  # ANTI-CORRIDA (04/09, tx 20260904T135046Z rolled-back a toa): medir o MainPID
+  # enquanto a unit ainda esta em 'activating'/'deactivating' pega o pid do ciclo
+  # que esta MORRENDO. Tres linhas depois o systemd entrega o pid novo, pid1!=pid2,
+  # e uma release BOA era revertida so por azar de relogio com o cron do minuto.
+  # Agora esperamos a unit assentar em 'active' ANTES de tirar a primeira medida, e
+  # so entao exigimos estabilidade do pid pelo stable_sleep.
   pid1=0
   i=0
   while [ "$i" -lt "$attempts" ]; do
-    if service_read is-active "$SERVICE" >/dev/null 2>&1; then
+    if service_read is-active "$SERVICE" >/dev/null 2>&1 && ! service_in_transition; then
       pid1="$(service_read show -p MainPID --value "$SERVICE" 2>/dev/null || echo 0)"
       case "$pid1" in ''|*[!0-9]*) pid1=0 ;; esac
       [ "$pid1" -gt 0 ] && break
@@ -1575,6 +1598,7 @@ health_smoke() {
   sleep "$stable_sleep"
   pid2="$(service_read show -p MainPID --value "$SERVICE" 2>/dev/null || echo 0)"
   [ "$pid1" = "$pid2" ] && service_read is-active "$SERVICE" >/dev/null 2>&1 || return 1
+  ! service_in_transition || return 1
   telegram_smoke "$live"
 }
 
@@ -1590,6 +1614,78 @@ report_version_from_tx() {
   curl -fsS --max-time 15 -X POST "$central/versao-report" \
     -H 'Content-Type: application/json' \
     -d "{\"email\":\"$email\",\"versao\":\"$ver\"}" >/dev/null 2>&1 || true
+}
+
+# ---- TRAVA DE COMMIT (04/09) ----------------------------------------------
+# O caminho de commit grava status=committed e SO reinicia o servico dezenas de
+# linhas depois. O finalizador roda pelo cron a cada minuto: se o tique caisse
+# nessa janela, ele media o pid do processo velho, o restart trocava o pid dentro
+# do stable_sleep e uma release BOA levava rollback (caso provado: tx
+# 20260904T135046Z-323211). O commit agora segura a trava do finalizador ANTES de
+# escrever 'committed' e so solta depois do restart com o pid novo estavel.
+#
+# Regra de ouro: trava presa e PIOR que a corrida (a transacao ficaria eterna em
+# 'committed', sem sucesso e sem rollback). Por isso a trava e AUTO-EXPIRAVEL:
+# finalize_transaction reivindica qualquer trava mais velha que o teto abaixo.
+LEON_FINALIZE_LOCK_TTL="${LEON_FINALIZE_LOCK_TTL:-600}"
+
+# Espera o servico voltar a 'active' com MainPID > 0 e estavel pelo stable_sleep
+# (a mesma prova do health_smoke) e so entao libera o finalizador. Nunca falha o
+# update: o teto de tentativas garante saida, e o pior caso e o finalizador pegar
+# a casa como sempre pegou.
+commit_lock_release_after_restart() {
+  local attempts stable_sleep pid1 pid2 i
+  [ -n "$COMMIT_LOCK" ] || return 0
+  attempts="${LEON_HEALTH_ATTEMPTS:-15}"
+  stable_sleep="${LEON_HEALTH_STABLE_SLEEP:-3}"
+  pid1=0
+  i=0
+  while [ "$i" -lt "$attempts" ]; do
+    if service_read is-active "$SERVICE" >/dev/null 2>&1 && ! service_in_transition; then
+      pid1="$(service_read show -p MainPID --value "$SERVICE" 2>/dev/null || echo 0)"
+      case "$pid1" in ''|*[!0-9]*) pid1=0 ;; esac
+      [ "$pid1" -gt 0 ] && break
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  if [ "$pid1" -gt 0 ]; then
+    sleep "$stable_sleep"
+    pid2="$(service_read show -p MainPID --value "$SERVICE" 2>/dev/null || echo 0)"
+    if [ "$pid1" != "$pid2" ]; then
+      # ainda balancando: da mais uma janela antes de entregar ao finalizador
+      sleep "$stable_sleep"
+    fi
+  fi
+  finalize_lock_release "$COMMIT_LOCK"
+  COMMIT_LOCK=""
+}
+
+finalize_lock_age() {  # idade em segundos do dir de trava (vazio = nao existe)
+  local dir="$1" mtime now
+  mtime="$(stat -c %Y -- "$dir" 2>/dev/null || true)"
+  case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
+  now="$(date +%s)"
+  printf '%s\n' "$(( now - mtime ))"
+}
+
+# Toma a trava. 0 = tomei; 1 = outro dono viva, saia de fininho.
+finalize_lock_acquire() {
+  local dir="$1" age
+  mkdir -- "$dir" 2>/dev/null && return 0
+  age="$(finalize_lock_age "$dir" 2>/dev/null || true)"
+  case "$age" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$age" -ge "$LEON_FINALIZE_LOCK_TTL" ] || return 1
+  # Trava orfa (atualizador morto no restart antes de soltar): reivindica.
+  rmdir -- "$dir" 2>/dev/null || true
+  mkdir -- "$dir" 2>/dev/null || return 1
+  return 0
+}
+
+finalize_lock_release() {
+  [ -z "${1:-}" ] || rmdir -- "$1" 2>/dev/null || true
 }
 
 finalize_transaction() {
@@ -1611,7 +1707,9 @@ finalize_transaction() {
     *) return 0 ;;
   esac
   lock_dir="$tx/.finalize-lock"
-  mkdir "$lock_dir" 2>/dev/null || return 0
+  # Trava presente = commit em andamento (ou outro finalizador). Sai em paz: o
+  # proximo tique do cron encontra a casa estavel. So reivindica trava expirada.
+  finalize_lock_acquire "$lock_dir" || return 0
   trap 'rmdir -- "$lock_dir" 2>/dev/null || true' RETURN
   if health_smoke "$tx"; then
     # O veredito de saúde torna o commit definitivo. A remoção posterior do
@@ -1694,6 +1792,7 @@ MODEL_SMOKE_HOME=""
 MODEL_SMOKE_DIR=""
 MODEL_SMOKE_OUT=""
 MUTATION_STARTED=0
+COMMIT_LOCK=""
 CRON_ARMED=0
 RESTARTING=0
 FAIL_MESSAGE="A atualização foi interrompida antes de concluir. A versão anterior foi preservada."
@@ -1712,6 +1811,10 @@ fatal() {
 cleanup_main() {
   local status=$?
   set +e
+  # A trava do commit NUNCA pode sobreviver ao processo: presa, a transacao ficaria
+  # eterna em 'committed' (nem sucesso, nem rollback). Solta em toda saida — sucesso,
+  # fatal, rollback e INT/TERM. Morte por SIGKILL ainda e coberta pelo TTL da trava.
+  [ -z "$COMMIT_LOCK" ] || { finalize_lock_release "$COMMIT_LOCK"; COMMIT_LOCK=""; }
   [ -z "$TARBALL" ] || rm -f -- "$TARBALL"
   [ -z "$BASE_HASH_TMP" ] || rm -f -- "$BASE_HASH_TMP"
   [ -z "$RELEASE_MANIFEST" ] || rm -f -- "$RELEASE_MANIFEST"
@@ -2409,6 +2512,12 @@ if [ "${LEON_TEST_FAIL_AT:-}" = "between_renames" ]; then
   fatal "falha injetada entre os renames."
 fi
 mv -- "$STAGE" "$INSTALL_DIR"
+# TRAVA ANTES DO 'committed': o cron do finalizador dispara a cada minuto e, sem
+# isso, media a saude no meio do nosso proprio restart (pid velho x pid novo) e
+# revertia release boa. Segura ate o servico assentar; COMMIT_LOCK != "" faz o
+# cleanup_main soltar em qualquer saida, e a trava expira sozinha se formos mortos.
+COMMIT_LOCK="$TX_DIR/.finalize-lock"
+finalize_lock_acquire "$COMMIT_LOCK" || COMMIT_LOCK=""
 printf 'committed\n' > "$TX_DIR/status"
 printf '{"ts":%s,"backup":"%s","transaction":"%s"}\n' \
   "$(date +%s)" "$BACKUP" "$TX_ID" > "$INSTALL_DIR/.pos-update.json"
@@ -2500,6 +2609,9 @@ say "commit atomico concluido; reiniciando $SERVICE"
 if [ "$TEST_MODE" = "1" ]; then
   service_write restart "$SERVICE"
   MUTATION_STARTED=0
+  # Solta a trava so DEPOIS do restart: o finalizador daqui roda inline, mas o cron
+  # do minuto tambem pode estar batendo na porta.
+  commit_lock_release_after_restart
   if finalize_transaction "$TX_DIR"; then
     exit 0
   fi
@@ -2515,9 +2627,14 @@ RESTART_STATUS=$?
 set -e
 if [ "$RESTART_STATUS" -ne 0 ]; then
   RESTARTING=0
+  finalize_lock_release "$COMMIT_LOCK"; COMMIT_LOCK=""
   rollback_transaction "$TX_DIR" || true
   fatal "o serviço recusou o reinício; a versão anterior foi restaurada."
 fi
+# O restart deu certo. Se este processo sobreviveu a ele, espera o pid novo assentar
+# e SO ENTAO libera o finalizador. Se o restart nos matou junto com o cgroup antigo,
+# a trava fica orfa e o TTL a reivindica no tique seguinte — o cron nunca trava.
+commit_lock_release_after_restart
 
 # Algumas units encerram somente o processo principal e deixam o atualizador
 # terminar. Nesse caso concluimos agora; o cron percebe o veredito e se remove.

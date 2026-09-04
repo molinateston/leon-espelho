@@ -1987,12 +1987,13 @@ EOF
     "$LEON_DATA_DIR/persona" "$LEON_WORK_AREA" "$LEON_STATE_DIR" "$LEON_MISSIONS_DIR" \
     "$LEON_PROMISES_DIR" "$LEON_MISSION_OUTPUT_DIR"
   chmod 700 "$LEON_DATA_DIR" "$LEON_CODEX_HOME" "$LEON_TMPDIR" "$LEON_STATE_DIR" "$LEON_MISSION_OUTPUT_DIR"
-  # Perfil dedicado do LEON: o motor escreve apenas nas areas de trabalho,
-  # nao enxerga arquivos de credencial e so acessa destinos de rede aprovados.
+  # Decisão do dono 04/09: mesmo modo do mestre; o isolamento por bubblewrap falha em
+  # Ubuntu 24.04 pra usuário comum e o agente não executa nada.
   cat > "$LEON_CODEX_HOME/config.toml" <<EOF
 model = "$CODEX_MODEL"
 model_reasoning_effort = "high"
 preferred_auth_method = "chatgpt"
+sandbox_mode = "danger-full-access"
 approval_policy = "never"
 default_permissions = "leon"
 allow_login_shell = false
@@ -2003,8 +2004,10 @@ trust_level = "untrusted"
 [projects."$LEON_WORK_AREA"]
 trust_level = "trusted"
 
+# Seções abaixo ficam por compatibilidade de leitura; sob danger-full-access o Codex
+# NÃO monta sandbox e NÃO aplica estes filtros.
 [permissions.leon]
-description = "LEON: leitura mínima e escrita apenas em diretórios de dados explícitos."
+description = "LEON: perfil herdado (inerte sob danger-full-access)."
 
 [permissions.leon.workspace_roots]
 "$LEON_WORK_AREA" = true
@@ -2017,8 +2020,6 @@ glob_scan_max_depth = 4
 ":root" = "deny"
 ":minimal" = "read"
 "$LEON_DATA_DIR/codex-cli" = "read"
-# 26/08: rede ligada exige DNS — sem estes dois em leitura, o resolv morre e a rede "ligada"
-# continua inútil (medido na auditoria: TCP pra IP direto passa, nome de domínio falha).
 "/etc/resolv.conf" = "read"
 "/etc/hosts" = "read"
 "$LEON_SKILLS_DIR" = "read"
@@ -2036,13 +2037,8 @@ glob_scan_max_depth = 4
 "keys/**" = "deny"
 
 [permissions.leon.network]
-# 26/08 (lei do dono): Vercel, Zernio e afins são APIs BÁSICAS DO USO — o agente precisa de
-# rede pros comandos dele (curl, CLIs de deploy). O cofre de credenciais só faz sentido com
-# isto ligado. Raiz negada e filtros de env seguem valendo.
 enabled = true
 
-# Knob OFICIAL do Codex: sandbox workspace-write bloqueia rede por padrão; sem esta seção,
-# o enabled acima não basta.
 [sandbox_workspace_write]
 network_access = true
 
