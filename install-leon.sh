@@ -1987,15 +1987,17 @@ EOF
     "$LEON_DATA_DIR/persona" "$LEON_WORK_AREA" "$LEON_STATE_DIR" "$LEON_MISSIONS_DIR" \
     "$LEON_PROMISES_DIR" "$LEON_MISSION_OUTPUT_DIR"
   chmod 700 "$LEON_DATA_DIR" "$LEON_CODEX_HOME" "$LEON_TMPDIR" "$LEON_STATE_DIR" "$LEON_MISSION_OUTPUT_DIR"
-  # Decisão do dono 04/09: mesmo modo do mestre; o isolamento por bubblewrap falha em
-  # Ubuntu 24.04 pra usuário comum e o agente não executa nada.
+  # Decisão do dono 04/09: mesmo modo do mestre, acesso total. Provado no 99: com
+  # default_permissions = "leon" + seções [permissions.leon.*] o Codex mantém o
+  # isolamento ligado mesmo sob sandbox_mode = "danger-full-access" (cai em
+  # "bwrap: setting up uid map: Permission denied"); o modo só vale quando o perfil
+  # NÃO existe. Por isso o perfil e o [sandbox_workspace_write] saíram do config.
   cat > "$LEON_CODEX_HOME/config.toml" <<EOF
 model = "$CODEX_MODEL"
 model_reasoning_effort = "high"
 preferred_auth_method = "chatgpt"
 sandbox_mode = "danger-full-access"
 approval_policy = "never"
-default_permissions = "leon"
 allow_login_shell = false
 
 [projects."$INSTALL_DIR"]
@@ -2003,44 +2005,6 @@ trust_level = "untrusted"
 
 [projects."$LEON_WORK_AREA"]
 trust_level = "trusted"
-
-# Seções abaixo ficam por compatibilidade de leitura; sob danger-full-access o Codex
-# NÃO monta sandbox e NÃO aplica estes filtros.
-[permissions.leon]
-description = "LEON: perfil herdado (inerte sob danger-full-access)."
-
-[permissions.leon.workspace_roots]
-"$LEON_WORK_AREA" = true
-"$LEON_DATA_DIR/brain" = true
-"$LEON_TMPDIR" = true
-"$LEON_MISSION_OUTPUT_DIR" = true
-
-[permissions.leon.filesystem]
-glob_scan_max_depth = 4
-":root" = "deny"
-":minimal" = "read"
-"$LEON_DATA_DIR/codex-cli" = "read"
-"/etc/resolv.conf" = "read"
-"/etc/hosts" = "read"
-"$LEON_SKILLS_DIR" = "read"
-"$LEON_WORK_AREA" = "write"
-"$LEON_DATA_DIR/brain" = "write"
-"$LEON_TMPDIR" = "write"
-"$LEON_MISSION_OUTPUT_DIR" = "write"
-
-[permissions.leon.filesystem.":workspace_roots"]
-"." = "read"
-".env" = "deny"
-"**/.env" = "deny"
-"**/.env.*" = "deny"
-"keys" = "deny"
-"keys/**" = "deny"
-
-[permissions.leon.network]
-enabled = true
-
-[sandbox_workspace_write]
-network_access = true
 
 [features]
 multi_agent_v2 = true

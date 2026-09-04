@@ -1178,15 +1178,17 @@ PY
 
 write_codex_config_candidate() {
   local destination="$1"
-  # Decisão do dono 04/09: mesmo modo do mestre; o isolamento por bubblewrap falha em
-  # Ubuntu 24.04 pra usuário comum e o agente não executa nada.
+  # Decisão do dono 04/09: mesmo modo do mestre, acesso total. Provado no 99: com
+  # default_permissions = "leon" + seções [permissions.leon.*] o Codex mantém o
+  # isolamento ligado mesmo sob sandbox_mode = "danger-full-access" (cai em
+  # "bwrap: setting up uid map: Permission denied"); o modo só vale quando o perfil
+  # NÃO existe. Por isso o perfil e o [sandbox_workspace_write] saíram do config.
   cat > "$destination" <<EOF
 model = "${CODEX_MODEL_EFETIVO:-gpt-5.6-sol}"
 model_reasoning_effort = "high"
 preferred_auth_method = "chatgpt"
 sandbox_mode = "danger-full-access"
 approval_policy = "never"
-default_permissions = "leon"
 allow_login_shell = false
 
 [projects."$INSTALL_DIR"]
@@ -1194,44 +1196,6 @@ trust_level = "untrusted"
 
 [projects."$LEON_WORK_AREA"]
 trust_level = "trusted"
-
-# Seções abaixo ficam por compatibilidade de leitura; sob danger-full-access o Codex
-# NÃO monta sandbox e NÃO aplica estes filtros.
-[permissions.leon]
-description = "LEON: perfil herdado (inerte sob danger-full-access)."
-
-[permissions.leon.workspace_roots]
-"$LEON_WORK_AREA" = true
-"$LEON_DATA_DIR/brain" = true
-"$LEON_TMPDIR" = true
-"$LEON_MISSION_OUTPUT_DIR" = true
-
-[permissions.leon.filesystem]
-glob_scan_max_depth = 4
-":root" = "deny"
-":minimal" = "read"
-"$LEON_DATA_DIR/codex-cli" = "read"
-"/etc/resolv.conf" = "read"
-"/etc/hosts" = "read"
-"$LEON_SKILLS_DIR" = "read"
-"$LEON_WORK_AREA" = "write"
-"$LEON_DATA_DIR/brain" = "write"
-"$LEON_TMPDIR" = "write"
-"$LEON_MISSION_OUTPUT_DIR" = "write"
-
-[permissions.leon.filesystem.":workspace_roots"]
-"." = "read"
-".env" = "deny"
-"**/.env" = "deny"
-"**/.env.*" = "deny"
-"keys" = "deny"
-"keys/**" = "deny"
-
-[permissions.leon.network]
-enabled = true
-
-[sandbox_workspace_write]
-network_access = true
 
 [features]
 multi_agent_v2 = true
@@ -1303,17 +1267,15 @@ import sys
 try: import tomllib
 except ImportError: import tomli as tomllib
 data=tomllib.load(open(sys.argv[1],"rb"))
-profile=data.get("permissions",{}).get("leon",{})
-filesystem=profile.get("filesystem",{})
-if data.get("approval_policy")!="never" or data.get("default_permissions")!="leon": raise SystemExit(1)
-if filesystem.get(":root")!="deny" or filesystem.get(":minimal")!="read": raise SystemExit(1)
-# Decisao do dono 04/09: mesmo modo do mestre. O unico sandbox_mode aceito e
-# danger-full-access; qualquer outro valor (ou a ausencia) reprova o candidato.
+if data.get("approval_policy")!="never": raise SystemExit(1)
+# Decisao do dono 04/09: cliente roda EXATAMENTE como o mestre, acesso total. O unico
+# sandbox_mode aceito e danger-full-access; qualquer outro valor (ou a ausencia) reprova.
 if data.get("sandbox_mode")!="danger-full-access": raise SystemExit(1)
-# sandbox_workspace_write, se presente, aceito com exatamente {"network_access": true};
-# qualquer outra chave nessa secao (writable_roots etc.) continua proibida.
-sww=data.get("sandbox_workspace_write")
-if sww is not None and sww!={"network_access": True}: raise SystemExit(1)
+# Provado no 99: perfil de permissoes nomeado mantem o isolamento ligado mesmo sob
+# danger-full-access (bwrap uid map denied). Perfil no candidato = candidato reprovado.
+if "default_permissions" in data: raise SystemExit(1)
+if "permissions" in data: raise SystemExit(1)
+if "sandbox_workspace_write" in data: raise SystemExit(1)
 PY
 }
 
