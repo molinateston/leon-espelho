@@ -953,6 +953,24 @@ fi
 CENTRAL="${LEON_CENTRAL:-https://licenca.leonardomolina.com.br}"
 LEON_USER="${LEON_USER:-leon}"
 
+# Rede primaria: confere a licenca do e-mail na central ANTES de baixar o motor,
+# pra pegar e-mail digitado errado no primeiro segundo (o download tem o gate real).
+# So o 404 explicito (email_nao_encontrado) para. Central fora do ar ou resposta
+# inesperada nao emperra: segue pro download, que confere de novo.
+if [ "$MOCK_MODE" != "1" ]; then
+  EMAIL_ENC_CHK=$(printf %s "$EMAIL" | python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.stdin.read().strip(), safe=''))" 2>/dev/null || printf %s "$EMAIL")
+  STATUS_CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$CENTRAL/status?email=$EMAIL_ENC_CHK" 2>/dev/null || echo "000")
+  if [ "$STATUS_CODE" = "404" ]; then
+    echo "" >&2
+    echo "O e-mail que voce digitou foi: $EMAIL" >&2
+    echo "Nao achei licenca pra ele na central." >&2
+    echo "Confere se esta EXATAMENTE igual ao da compra: sem espaco, com o dominio certo (gmail, ymail, hotmail)." >&2
+    echo "Se estiver certo e voce comprou agora, aguarde 1 min e rode de novo." >&2
+    echo "Suporte: https://wa.me/5511988890934" >&2
+    exit 1
+  fi
+fi
+
 echo ""
 echo "========================================"
 echo "  PROJETO LEON · Socio IA 24x7"
