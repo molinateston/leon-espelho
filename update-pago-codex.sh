@@ -209,7 +209,7 @@ if data["schema"]!=2 or data["kind"]!="leon-codex-release" or data["channel"]!="
 if data["keyFingerprint"]!=fingerprint: raise SystemExit(1)
 version_re=re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
 if not version_re.fullmatch(str(data["version"])) or not version_re.fullmatch(str(data["minVersion"])): raise SystemExit(1)
-if data["codexCliVersion"]!="0.147.0" or data["nodeVersion"]!="22.22.0": raise SystemExit(1)
+if data["codexCliVersion"]!="0.153.3" or data["nodeVersion"]!="22.22.0": raise SystemExit(1)
 artifacts=data["artifacts"]
 if set(artifacts)!={"base","bundle","skills","updater"}: raise SystemExit(1)
 expected={
@@ -1887,7 +1887,7 @@ CENTRAL="$(env_get_from "$ENV_READ_SAFE" LEON_LICENSE_CENTRAL)"
 if [ -z "$EMAIL" ] || [ -z "$CENTRAL" ]; then
   fatal "faltam os dados da licença na configuração."
 fi
-[ -n "$LEON_CODEX_CLI_VERSION" ] || LEON_CODEX_CLI_VERSION="0.147.0"
+[ -n "$LEON_CODEX_CLI_VERSION" ] || LEON_CODEX_CLI_VERSION="0.153.3"
 [ -n "$LEON_SKILLS_DIR" ] || LEON_SKILLS_DIR="$LEON_DATA_DIR/skills"
 [ -n "$LEON_TMPDIR" ] || LEON_TMPDIR="$LEON_DATA_DIR/tmp"
 [ -n "$LEON_WORK_AREA" ] || LEON_WORK_AREA="$HOME/trabalho"
