@@ -2010,9 +2010,13 @@ EOF
   # isolamento ligado mesmo sob sandbox_mode = "danger-full-access" (cai em
   # "bwrap: setting up uid map: Permission denied"); o modo só vale quando o perfil
   # NÃO existe. Por isso o perfil e o [sandbox_workspace_write] saíram do config.
+  # ESFORÇO POR TAREFA (2.4.31): o config nasce em "medium". O bridge roteia o esforço por
+  # fala (low no trivial, high na missão e no pedido de raciocínio), então este valor é só o
+  # piso de quem roda o Codex fora da ponte. "high" cravado aqui era raciocínio invisível
+  # cobrado em todo turno, e é o que estourava a cota do dono no plano Plus.
   cat > "$LEON_CODEX_HOME/config.toml" <<EOF
 model = "$CODEX_MODEL"
-model_reasoning_effort = "high"
+model_reasoning_effort = "medium"
 preferred_auth_method = "chatgpt"
 sandbox_mode = "danger-full-access"
 approval_policy = "never"
