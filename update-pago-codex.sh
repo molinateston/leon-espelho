@@ -1582,6 +1582,27 @@ report_version_from_tx() {
     -d "{\"email\":\"$email\",\"versao\":\"$ver\"}" >/dev/null 2>&1 || true
 }
 
+# F1.5: rastro do ciclo da madrugada na central. Best-effort, timeout curto, NUNCA derruba o
+# update. So rotulo curto e resultado (ok|erro) + motivo curto — zero segredo, zero conversa.
+# Em AUTO mode (sem tty) o /atualiza hoje falha em silencio; agora deixa marca na central.
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/ /g' | tr -d '\r\n' | cut -c1-160; }
+report_diagnostico_from_tx() {
+  local tx="$1" resultado="$2" motivo="$3" email central machine_id versao evento
+  email="$(cat "$tx/report-email" 2>/dev/null || true)"
+  central="$(cat "$tx/report-central" 2>/dev/null || true)"
+  [ -n "$email" ] && [ -n "$central" ] || return 0
+  printf %s "$central" | grep -qE '^https://' || return 0
+  machine_id="$(cat "$tx/report-machine-id" 2>/dev/null || true)"
+  # versao viva depois do ciclo: nova no ok, antiga no erro (o mesmo criterio do report honesto)
+  if [ "$resultado" = "ok" ]; then versao="$(cat "$tx/new-version" 2>/dev/null || true)"
+  else versao="$(cat "$tx/prev-version" 2>/dev/null || true)"; fi
+  evento="update-auto"; [ -f "$tx/report-auto" ] && [ -z "$(cat "$tx/report-auto" 2>/dev/null)" ] && evento="update"
+  curl -fsS --max-time 15 -X POST "$central/diagnostico" \
+    -H 'Content-Type: application/json' \
+    -d "{\"email\":\"$(json_escape "$email")\",\"machine_id\":\"$(json_escape "$machine_id")\",\"versao\":\"$(json_escape "$versao")\",\"evento\":\"$evento\",\"resultado\":\"$(json_escape "$resultado")\",\"motivo\":\"$(json_escape "$motivo")\",\"em\":$(date +%s)000}" \
+    >/dev/null 2>&1 || true
+}
+
 # ---- TRAVA DE COMMIT (04/09) ----------------------------------------------
 # O caminho de commit grava status=committed e SO reinicia o servico dezenas de
 # linhas depois. O finalizador roda pelo cron a cada minuto: se o tique caisse
@@ -1692,6 +1713,8 @@ finalize_transaction() {
     rm -f -- "$live/.update-pending.json" 2>/dev/null || true
     # Report HONESTO: a versao NOVA so agora, depois de passar na prova de saude.
     report_version_from_tx "$tx" new-version
+    # F1.5: rastro do ciclo bem-sucedido na central (sinal da frota).
+    report_diagnostico_from_tx "$tx" ok "atualizou e passou na prova de saude"
     # SEM msg de sucesso aqui: quem confirma "✅ No ar!" pro dono e o BRIDGE ao subir
     # (bridge.cjs, veioDeUpdate). Emitir aqui TAMBEM gerava mensagem DUPLICADA no Telegram
     # ("Atualizacao concluida" + "No ar!"). A saudacao do bridge e a fonte unica, e ela so
@@ -1704,6 +1727,9 @@ finalize_transaction() {
   # Report HONESTO: o update falhou e reverteu; a central precisa saber que a versao
   # viva e a ANTIGA, nao a nova. Sem isso o painel/monitor registrava sucesso falso.
   report_version_from_tx "$tx" prev-version
+  # F1.5: rastro do ciclo que reverteu na central (sinal da frota). Sem isso, a madrugada
+  # que falhava sumia: a central so via a versao antiga e nao sabia que houve tentativa.
+  report_diagnostico_from_tx "$tx" erro "prova de saude falhou; reverteu pra versao anterior"
   rmdir -- "$lock_dir" 2>/dev/null || true
   trap - RETURN
   return 1
@@ -2008,6 +2034,11 @@ IFS=$'\t' read -r INSTALLED_RELEASE_VERSION INSTALLED_RELEASE_DIGEST <<< "$INSTA
 printf '%s\n' "$version" > "$TX_DIR/new-version" 2>/dev/null || true
 printf '%s\n' "$EMAIL"   > "$TX_DIR/report-email" 2>/dev/null || true
 printf '%s\n' "$CENTRAL" > "$TX_DIR/report-central" 2>/dev/null || true
+# F1.5 (sinal da frota): o finalizador manda o RESULTADO da madrugada pra central via
+# /diagnostico. Guarda no tx o machine_id e se foi ciclo automatico (sem tty), pra o
+# rastro dizer se o /atualiza da madrugada deu certo ou o motivo do erro.
+printf '%s\n' "$(env_get_from "$ENV_READ_SAFE" LEON_MACHINE_ID)" > "$TX_DIR/report-machine-id" 2>/dev/null || true
+printf '%s\n' "${LEON_UPDATE_AUTO:+1}" > "$TX_DIR/report-auto" 2>/dev/null || true
 # prev-version pro report honesto no rollback (o TX_DIR ja existe desde a preparacao).
 printf '%s\n' "$INSTALLED_RELEASE_VERSION" > "$TX_DIR/prev-version" 2>/dev/null || true
 release_identity_acceptable "$version" "$RELEASE_MANIFEST_SHA256" "$INSTALLED_RELEASE_VERSION" "${INSTALLED_RELEASE_DIGEST:-}" \
