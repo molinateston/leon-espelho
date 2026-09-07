@@ -109,7 +109,7 @@ LEON_RELEASE_TRUST_FINGERPRINT='eb70521f5e4dd9bb1cd11e6ceb0b2bddd65596558322908a
 # Versoes homologadas do runtime dedicado do Codex: as mesmas que o
 # release-manifest declara e que o update-pago-codex.sh valida.
 : "${LEON_NODE_VERSION:=22.22.0}"
-: "${LEON_CODEX_CLI_VERSION:=0.153.3}"
+: "${LEON_CODEX_CLI_VERSION:=0.147.0}"
 : "${LEON_NODE_ROOT:=}"
 : "${LEON_CODEX_CLI_ROOT:=}"
 : "${LEON_NODE_BIN_RESOLVED:=}"
@@ -466,13 +466,13 @@ PY
   case "$arch" in
     x86_64|amd64)
       platform_alias=codex-linux-x64; target_triple=x86_64-unknown-linux-musl
-      platform_sha512=0b22efb8cf488fbb10b8db671ebcc7b45f83b4d21269ab9965a932872f8ca054b55f12931afdc5378fea87a73de1866d2d2b59eda5267d8433e7d5773d5e339e ;;
+      platform_sha512=d16f4c0713e9596d1c4a436aad30cdda347baf3cd3ee834c850639e38ea54f62f0e5ccf9ca10d3724e156bdae3910126f87945ccffdd98431265b5df26c20d9b ;;
     aarch64|arm64)
       platform_alias=codex-linux-arm64; target_triple=aarch64-unknown-linux-musl
-      platform_sha512=b9ac992a0cf9964ecfcf724f8cbf7c14640615172b6b1dec18443d0ad76ec99b1c6c87279f7898b3346f19cb9ba95c221e2dc1f68015ab2f15d8d7161b02262e ;;
+      platform_sha512=48b0b5257c364d87ebfdcdc786b26e6f2c8b7a5abbbd338b5959a24e1140fb3d3e5a0cc23e66ac789fe4cc30f71a07bf4ceedf0a79e3ed470f982d1dd9cf1702 ;;
     *) echo "ERRO: arquitetura sem pacote Codex homologado: $arch." >&2; return 1 ;;
   esac
-  main_sha512=4b0427b3e6085ef6975786ba45477db708133c99247d9a6e4cd1244ed224c019dfc3a7e94fad7e77a814d561d9c4aeaf58536a2420682443faf45200b283ddb8
+  main_sha512=1102c45de7001b6a6dc48ed4a41328d9347f81ae79f7afdcfceb1817fd0ba140e1e4900d67b2281aa97304459bb84550efa25e3c86ed4d6fe2842929d5aed9df
   main_url="https://registry.npmjs.org/@openai/codex/-/codex-${LEON_CODEX_CLI_VERSION}.tgz"
   platform_url="https://registry.npmjs.org/@openai/codex/-/codex-${LEON_CODEX_CLI_VERSION}-linux-${platform_alias##*-}.tgz"
   if [ "$LEON_TEST_CODEX_CLI_ONLY" = 1 ] && [ -n "$LEON_TEST_CODEX_MAIN_SHA512" ]; then
@@ -1469,7 +1469,7 @@ if data["schema"]!=2 or data["kind"]!="leon-codex-release" or data["channel"]!="
 if data["keyFingerprint"]!=fingerprint: raise SystemExit(1)
 version_re=re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
 if not version_re.fullmatch(str(data["version"])) or not version_re.fullmatch(str(data["minVersion"])): raise SystemExit(1)
-if data["codexCliVersion"]!="0.153.3" or data["nodeVersion"]!="22.22.0": raise SystemExit(1)
+if data["codexCliVersion"]!="0.147.0" or data["nodeVersion"]!="22.22.0": raise SystemExit(1)
 artifacts=data["artifacts"]
 if set(artifacts)!={"base","bundle","skills","updater"}: raise SystemExit(1)
 expected={
