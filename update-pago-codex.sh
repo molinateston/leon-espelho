@@ -24,7 +24,10 @@ semver_ge() {
   "$PYTHON_BIN" - "$1" "$2" <<'PY'
 import re, sys
 def parse(value):
-    if not re.fullmatch(r"0|[1-9]\d*(?:\.(?:0|[1-9]\d*)){2}", value): raise SystemExit(2)
+    # A alternancia PRECISA de grupo: sem ele o "0|" solto casava a string inteira "0"
+    # e qualquer versao comecada em zero (0.153.3, 0.147.0) caia como invalida (exit 2).
+    # Release do bridge comeca em 2, entao o defeito dormia; versao de CLI e sempre 0.x.
+    if not re.fullmatch(r"(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*)){2}", value): raise SystemExit(2)
     return tuple(map(int,value.split(".")))
 raise SystemExit(0 if parse(sys.argv[1]) >= parse(sys.argv[2]) else 1)
 PY
@@ -209,7 +212,10 @@ if data["schema"]!=2 or data["kind"]!="leon-codex-release" or data["channel"]!="
 if data["keyFingerprint"]!=fingerprint: raise SystemExit(1)
 version_re=re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
 if not version_re.fullmatch(str(data["version"])) or not version_re.fullmatch(str(data["minVersion"])): raise SystemExit(1)
-if data["codexCliVersion"]!="0.147.0" or data["nodeVersion"]!="22.22.0": raise SystemExit(1)
+# codexCliVersion virou MINIMA (nao mais versao exata cravada): a casa que roda um CLI
+# igual ou mais novo sobe normal. Continua obrigatoriamente um semver assinado pela central.
+# Node segue cravado: e o runtime que o pacote realmente exige, nao um piso.
+if not version_re.fullmatch(str(data["codexCliVersion"])) or data["nodeVersion"]!="22.22.0": raise SystemExit(1)
 artifacts=data["artifacts"]
 if set(artifacts)!={"base","bundle","skills","updater"}: raise SystemExit(1)
 expected={
@@ -737,6 +743,91 @@ if not stat.S_ISREG(target.st_mode) or target.st_uid!=os.getuid() or stat.S_IMOD
 PY
 }
 
+# ---- SUBIDA DO MOTOR PELO CAMINHO NATIVO (2.4.34) --------------------------
+# O proprio Codex CLI sabe se atualizar: `codex update` existe na 0.147 (a da frota) e por
+# baixo roda `npm install -g @openai/codex`. Com npm_config_prefix apontando pra um prefixo
+# nosso, ele instala LA DENTRO e nao encosta em nada global da VPS.
+#
+# Regra de ouro: a casa nunca pode ficar sem motor. Por isso a instalacao acontece num
+# prefixo de ENCENACAO, a versao nova entra como um IRMAO novo em codex-cli/releases/ e a
+# release velha fica intacta no disco ate o fim. Quem decide qual roda e o LEON_CODEX_CLI_VERSION
+# que o .env do stage recebe — se qualquer passo aqui falhar, o .env sai com a versao ANTIGA
+# e o update do bridge segue inteiro. Best-effort de verdade: nenhum caminho daqui da fatal.
+#
+# Ecoa a versao nova no stdout quando (e so quando) ela ja esta validada no lugar definitivo.
+subir_codex_cli_nativo() {
+  local bin_atual="$1" data_dir="$2" minima="$3" tx="$4" node_bin="$5"
+  local staging="$data_dir/codex-cli/.upgrade-$tx" nova release_novo bin_novo
+  local pkg="$staging/lib/node_modules/@openai/codex"
+
+  rm -rf -- "$staging" 2>/dev/null || true
+  mkdir -p -- "$staging" 2>/dev/null || return 1
+  chmod 0700 "$staging" 2>/dev/null || true
+  # Registra pro cleanup_main: morte por sinal no meio do npm nao deixa lixo no disco.
+  CODEX_CLI_STAGING="$staging"
+
+  # O `codex update` herda o PATH pra achar o npm/node. Damos o node dedicado primeiro.
+  # Teto de 5 min: sem rede o npm fica pendurado e o /atualiza nao pode parar por causa disso.
+  if ! env npm_config_prefix="$staging" \
+        npm_config_audit=false npm_config_fund=false npm_config_update_notifier=false \
+        PATH="$(dirname "$node_bin"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+        timeout 300 "$bin_atual" update >/dev/null 2>&1; then
+    rm -rf -- "$staging" 2>/dev/null || true
+    return 1
+  fi
+
+  # A partir daqui so confio no que o disco mostra: o `codex update` pode sair 0 e ter
+  # instalado nada (npm resolveu do cache, prefixo ignorado, pacote parcial).
+  [ -d "$pkg" ] || { rm -rf -- "$staging" 2>/dev/null || true; return 1; }
+  nova="$("$PYTHON_BIN" - "$pkg/package.json" <<'PY'
+import json,re,sys
+try: value=str(json.load(open(sys.argv[1],encoding="utf-8"))["version"])
+except Exception: raise SystemExit(1)
+if not re.fullmatch(r"(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*)){2}",value): raise SystemExit(1)
+print(value)
+PY
+)" || { rm -rf -- "$staging" 2>/dev/null || true; return 1; }
+
+  # Nao aceito andar pra tras nem ficar abaixo do que a release pede.
+  semver_ge "$nova" "$minima" || { rm -rf -- "$staging" 2>/dev/null || true; return 1; }
+
+  release_novo="$data_dir/codex-cli/releases/$nova"
+  bin_novo="$release_novo/bin/codex"
+  # Ja tenho essa versao no disco (retomada de um /atualiza anterior): nao mexo, so valido.
+  if [ ! -e "$release_novo" ]; then
+    # O layout dedicado e bin/codex -> ../lib/node_modules/@openai/codex/bin/codex.js.
+    # O npm ja monta lib/node_modules e um bin/codex; normalizo o link pra relativo, que e
+    # o que o validate_dedicated_codex_cli exige (realpath tem que cair dentro do release).
+    [ -f "$pkg/bin/codex.js" ] || { rm -rf -- "$staging" 2>/dev/null || true; return 1; }
+    rm -f -- "$staging/bin/codex" 2>/dev/null || true
+    mkdir -p -- "$staging/bin" 2>/dev/null || true
+    ln -s ../lib/node_modules/@openai/codex/bin/codex.js "$staging/bin/codex" 2>/dev/null \
+      || { rm -rf -- "$staging" 2>/dev/null || true; return 1; }
+    chmod 0700 "$pkg/bin/codex.js" 2>/dev/null || true
+    chmod -R go-w -- "$staging" 2>/dev/null || true
+    mkdir -p -- "$data_dir/codex-cli/releases" 2>/dev/null || true
+    # Rename no mesmo filesystem: ou o irmao novo aparece inteiro, ou nao aparece.
+    mv -- "$staging" "$release_novo" 2>/dev/null \
+      || { rm -rf -- "$staging" 2>/dev/null || true; return 1; }
+  else
+    rm -rf -- "$staging" 2>/dev/null || true
+  fi
+  # O prefixo de encenacao acabou (virou release ou foi apagado). Solto do cleanup pra
+  # nao deixar um caminho morto apontando pra perto da release nova.
+  CODEX_CLI_STAGING=""
+
+  # Prova no lugar definitivo: mesma validacao que o updater faz na versao viva, e o binario
+  # tem que responder --version com a versao que promete. Se reprovar, NAO removo o irmao
+  # (pode ser uma instalacao boa de outra origem), so devolvo erro e a casa segue na antiga.
+  validate_dedicated_codex_cli "$bin_novo" "$data_dir" "$nova" || return 1
+  [ "$(PATH="$(dirname "$node_bin"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+      "$bin_novo" --version 2>/dev/null \
+      | awk 'NR == 1 { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+([_-][A-Za-z0-9.-]+)?$/) { print $i; exit } }')" \
+    = "$nova" ] || return 1
+
+  printf '%s\n' "$nova"
+}
+
 validate_dedicated_node() {
   "$PYTHON_BIN" - "$1" "$2" "$3" <<'PY'
 import os,stat,sys
@@ -914,7 +1005,10 @@ for key, value in replacements.items():
         raise SystemExit(f"invalid runtime path for {key}")
     text = text.replace(f"@@{key}@@", value)
     text = re.sub(rf"\$\{{?{key}\}}?", lambda _match, v=value: v, text)
-if "@@LEON_" in text or re.search(r"\$LEON_", text):
+# So sinaliza TEMPLATE nao-substituido (as chaves de replacements). $LEON_ENV_FILE e uma
+# VARIAVEL DE RUNTIME real (o bridge a exporta), citada de proposito na doutrina F4, nao e
+# placeholder de build, entao a regex ampla \$LEON_ a barrava por engano e emperrava a base.
+if "@@LEON_" in text or re.search(r"\$\{?(?:" + "|".join(replacements) + r")\}?", text):
     raise SystemExit("unresolved LEON placeholder in AGENT-BASE")
 marker = "## Skills LEON Codex (diretiva canônica)"
 if marker not in text:
@@ -927,6 +1021,67 @@ with open(tmp, "w", encoding="utf-8") as handle:
 os.chmod(tmp, os.stat(path).st_mode & 0o777)
 os.replace(tmp, path)
 PY
+}
+
+# GUARDA DA DOUTRINA ANTES DE PROMOVER (2.4.35). O bridge morre no turno se sobrar qualquer
+# placeholder LEON nao resolvido na doutrina. Ate a 2.4.34 o updater promovia a release e a casa
+# so descobria no primeiro turno, muda (caso Delano). Aqui rodamos a MESMA logica da guarda do
+# bridge contra a doutrina, a persona e o nucleo empacotados, ANTES do rename de promocao. Se
+# sobrar placeholder, NAO promove: a casa fica na versao de antes e o dono e avisado com a causa.
+# O bridge resolve (a) os 7 caminhos de runtime, (b) qualquer LEON_X presente no ambiente do
+# servico. O que a casa exporta esta no .env, entao o .env entra na conta, junto de LEON_ENV_FILE.
+validate_doutrina_sem_placeholder() {
+  local stage="$1" persona_dir="$2" env_file="$3" saida
+  saida="$("$PYTHON_BIN" - "$stage" "$persona_dir" "$env_file" "$INSTALL_DIR" <<'PY'
+import os, re, sys
+stage, persona_dir, env_file, install_dir = sys.argv[1:5]
+# Nomes que a casa REALMENTE tem na hora do turno: o ambiente do processo, tudo o que o .env
+# define, e LEON_ENV_FILE, que o bridge exporta sozinho (bridge.cjs process.env.LEON_ENV_FILE).
+conhecidos = {k for k in os.environ if k.startswith("LEON_") and os.environ[k]}
+conhecidos.add("LEON_ENV_FILE")
+conhecidos.update({
+    "LEON_SKILLS_DIR", "LEON_INSTALL_DIR", "LEON_TMPDIR", "LEON_CODEX_HOME",
+    "LEON_BRAIN_DIR", "LEON_WORK_AREA", "LEON_MISSION_OUTPUT_DIR",
+})
+try:
+    with open(env_file, encoding="utf-8", errors="replace") as fh:
+        for linha in fh:
+            m = re.match(r"\s*(?:export\s+)?(LEON_[A-Za-z0-9_]+)\s*=\s*(\S)", linha)
+            if m:
+                conhecidos.add(m.group(1))
+except OSError:
+    pass
+
+alvos = []
+base = os.path.join(stage, "AGENT-BASE.md")
+if os.path.isfile(base):
+    alvos.append(base)
+for peca in ("NUCLEO-LEON.md", "_MOTOR-CLAUDE.md", "_MOTOR-CODEX.md", "_REGRAS-DURAS.md", "CAMINHOS-CANONICOS.md"):
+    for raiz in (persona_dir, stage):
+        caminho = os.path.join(raiz, peca)
+        if os.path.isfile(caminho):
+            alvos.append(caminho)
+            break
+
+padrao = re.compile(r"@@(LEON_[A-Z0-9_]+)@@|\$\{(LEON_[A-Z0-9_]+)\}|\$(LEON_[A-Z0-9_]+)")
+for caminho in alvos:
+    try:
+        with open(caminho, encoding="utf-8", errors="replace") as fh:
+            texto = fh.read()
+    except OSError:
+        continue
+    for achado in padrao.finditer(texto):
+        nome = achado.group(1) or achado.group(2) or achado.group(3)
+        # @@NOME@@ e template de build: tinha que ter sido substituido, entao sempre reprova.
+        if achado.group(1) or nome not in conhecidos:
+            print(f"{nome}|{os.path.basename(caminho)}")
+            raise SystemExit(1)
+raise SystemExit(0)
+PY
+)" && return 0
+  DOUTRINA_PLACEHOLDER="${saida%%|*}"
+  DOUTRINA_PLACEHOLDER_ARQ="${saida##*|}"
+  return 1
 }
 
 validate_curated_base_manifest() {
@@ -1762,6 +1917,10 @@ LEON_MISSIONS_DIR="${LEON_MISSIONS_DIR:-}"
 LEON_PROMISES_DIR="${LEON_PROMISES_DIR:-}"
 LEON_MISSION_OUTPUT_DIR="${LEON_MISSION_OUTPUT_DIR:-}"
 LEON_CODEX_CLI_VERSION="${LEON_CODEX_CLI_VERSION:-}"
+LEON_CODEX_CLI_MINIMA=""
+CODEX_CLI_ABAIXO_DA_MINIMA=0
+CODEX_CLI_SUBIU=0
+CODEX_CLI_STAGING=""
 CONFIG_PATH="$CODEX_HOME_DIR/config.toml"
 TX_ROOT="$LEON_DATA_DIR/update-transactions"
 TX_DIR="$TX_ROOT/$TX_ID"
@@ -1794,6 +1953,8 @@ say() {
   printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG" 2>/dev/null || true
 }
 
+DOUTRINA_PLACEHOLDER=""
+DOUTRINA_PLACEHOLDER_ARQ=""
 fatal() {
   FAIL_MESSAGE="$1"
   printf 'ERRO: %s\n' "$1" >&2
@@ -1824,6 +1985,9 @@ cleanup_main() {
   [ -z "$MODEL_SMOKE_HOME" ] || rm -rf -- "$MODEL_SMOKE_HOME"
   [ -z "$MODEL_SMOKE_DIR" ] || rm -rf -- "$MODEL_SMOKE_DIR"
   [ -z "$MODEL_SMOKE_OUT" ] || rm -f -- "$MODEL_SMOKE_OUT"
+  # Prefixo de encenacao da subida do CLI: se formos mortos no meio do npm, nao pode sobrar
+  # meia instalacao no disco. A release VIVA nunca esta aqui dentro, entao apagar e sempre seguro.
+  [ -z "$CODEX_CLI_STAGING" ] || rm -rf -- "$CODEX_CLI_STAGING"
   case "${LEON_UPDATE_COPIA:-}" in
     "${TMPDIR:-/tmp}"/leon-update.*) rm -f -- "$LEON_UPDATE_COPIA" ;;
   esac
@@ -1887,7 +2051,13 @@ CENTRAL="$(env_get_from "$ENV_READ_SAFE" LEON_LICENSE_CENTRAL)"
 if [ -z "$EMAIL" ] || [ -z "$CENTRAL" ]; then
   fatal "faltam os dados da licença na configuração."
 fi
-[ -n "$LEON_CODEX_CLI_VERSION" ] || LEON_CODEX_CLI_VERSION="0.147.0"
+# Piso do canal: a release exige NO MINIMO esta versao de CLI. Casa com CLI igual ou mais
+# novo sobe normal; quem esta abaixo o updater tenta subir pelo `codex update` nativo.
+LEON_CODEX_CLI_MINIMA="0.147.0"
+# Default alinhado com o bridge (bridge.cjs codexBin() e lib-motores/codex-appserver.cjs):
+# .env sem a variavel = casa da frota antiga, que roda 0.147.0. Cravar 0.153.3 aqui fazia o
+# updater procurar um diretorio de release que a casa nunca teve e morrer antes de comecar.
+[ -n "$LEON_CODEX_CLI_VERSION" ] || LEON_CODEX_CLI_VERSION="$LEON_CODEX_CLI_MINIMA"
 [ -n "$LEON_SKILLS_DIR" ] || LEON_SKILLS_DIR="$LEON_DATA_DIR/skills"
 [ -n "$LEON_TMPDIR" ] || LEON_TMPDIR="$LEON_DATA_DIR/tmp"
 [ -n "$LEON_WORK_AREA" ] || LEON_WORK_AREA="$HOME/trabalho"
@@ -2004,8 +2174,16 @@ RELEASE_MANIFEST_SHA256="$(sha256sum "$RELEASE_MANIFEST" | awk '{print $1}')"
 # shellcheck disable=SC1090
 . "$RELEASE_METADATA"
 semver_ge "$version" "$minVersion" || fatal "release abaixo da versão mínima assinada."
-[ "$codexCliVersion" = "$LEON_CODEX_CLI_VERSION" ] \
-  || fatal "a release exige Codex CLI $codexCliVersion; rode o instalador antes do /atualiza."
+# MINIMA, nao exata (2.4.34): a igualdade cravada aqui foi a parede que segurou a frota
+# inteira na 2.4.33 — quem estava na 0.147 levava fatal ANTES de trocar qualquer arquivo e
+# nao recebia nada da release (liberdade, /effort, entrada duravel), embora o pacote rodasse
+# perfeitamente na 0.147. So o Astra depende do CLI novo, e ele ja tem gate proprio em runtime.
+# Guardo a minima pedida pra tentar subir o CLI pelo caminho nativo mais adiante, best-effort.
+LEON_CODEX_CLI_MINIMA="$codexCliVersion"
+if ! semver_ge "$LEON_CODEX_CLI_VERSION" "$LEON_CODEX_CLI_MINIMA"; then
+  CODEX_CLI_ABAIXO_DA_MINIMA=1
+  say "   o Codex CLI desta casa ($LEON_CODEX_CLI_VERSION) é anterior ao mínimo da release ($LEON_CODEX_CLI_MINIMA); sigo com o update e tento subir o motor no fim."
+fi
 [ "$nodeVersion" = "$LEON_NODE_VERSION" ] \
   || fatal "a release exige Node $nodeVersion; rode o instalador antes do /atualiza."
 # 02/set (blindagem pra escala): o marcador .leon-release.json é escrito pelo PRÓPRIO updater.
@@ -2175,9 +2353,26 @@ normalize_agent_base "$STAGE/AGENT-BASE.md" "$LEON_SKILLS_DIR"
 # moram na PERSONA, nao no runtime. O install-leon.sh move na instalacao; o updater
 # tem que fazer o mesmo, senao a casa atualizada fica com o nucleo velho na persona e o
 # novo parado no stage (bug pego na Babi: NUCLEO-LEON.md no ~/socio-ia, nao na persona).
+# So NORMALIZA aqui. A instalacao na persona VIVA fica pra depois da validacao: a persona e
+# estado da casa, e escrever nela antes de aprovar deixaria um nucleo invalido grudado mesmo
+# com a release recusada (o rename nem chegou a acontecer, mas a persona ja teria mudado).
+for _peca in NUCLEO-LEON.md _MOTOR-CLAUDE.md _MOTOR-CODEX.md _REGRAS-DURAS.md CAMINHOS-CANONICOS.md; do
+  [ -f "$STAGE/$_peca" ] || continue
+  normalize_agent_base "$STAGE/$_peca" "$LEON_SKILLS_DIR" 2>/dev/null || true
+done
+
+# A release nova so pode ser promovida se a doutrina dela sobreviver a guarda do bridge. Reprovou:
+# nada e trocado (nem o runtime, nem a persona) e a casa segue na versao de antes; o dono recebe a
+# causa e a central recebe o diagnostico com motivo=placeholder. Rodar isto DEPOIS da normalizacao
+# e de propósito: e o texto final, o mesmo que o bridge veria no primeiro turno.
+if ! validate_doutrina_sem_placeholder "$STAGE" "$STAGE" "$INSTALL_DIR/.env"; then
+  report_diagnostico_from_tx "$TX_DIR" erro "placeholder ${DOUTRINA_PLACEHOLDER:-LEON_?} em ${DOUTRINA_PLACEHOLDER_ARQ:-AGENT-BASE.md}"
+  fatal "a release veio com doutrina inválida (placeholder ${DOUTRINA_PLACEHOLDER:-LEON_?} em ${DOUTRINA_PLACEHOLDER_ARQ:-AGENT-BASE.md}); continuo na versão de antes."
+fi
+
+# Aprovada: agora sim as pecas entram na persona viva (mesmo efeito de antes, uma etapa depois).
 for _peca in NUCLEO-LEON.md _MOTOR-CLAUDE.md _MOTOR-CODEX.md _REGRAS-DURAS.md CAMINHOS-CANONICOS.md; do
   if [ -f "$STAGE/$_peca" ]; then
-    normalize_agent_base "$STAGE/$_peca" "$LEON_SKILLS_DIR" 2>/dev/null || true
     install -m 0600 "$STAGE/$_peca" "$LEON_DATA_DIR/persona/$_peca" 2>/dev/null || true
     rm -f -- "$STAGE/$_peca"
   fi
@@ -2465,6 +2660,24 @@ fi
 injetar_handoff_update_verdict "$STAGE/scripts/update-verdict.sh" \
   || fatal "não consegui gravar o handoff do /atualiza no vigia do stage; runtime preservado."
 
+# ---- MOTOR: tenta subir o CLI antes de gravar o .env do stage (2.4.34) -----
+# Aqui e o unico lugar certo: o .env logo abaixo carrega o LEON_CODEX_CLI_VERSION que o bridge
+# vai usar (bridge.cjs codexBin() deriva o caminho dessa variavel), e nada da casa viva foi
+# mutado ainda (MUTATION_STARTED so liga depois). Se a subida falhar, o .env sai com a versao
+# antiga e o update do bridge continua inteiro: a casa nunca fica sem motor.
+if [ "$CODEX_CLI_ABAIXO_DA_MINIMA" = "1" ] && [ "$TEST_MODE" != "1" -o "${LEON_TEST_CLI_NATIVO:-0}" = "1" ]; then
+  say "   subindo o motor Codex pelo caminho nativo (best-effort, teto de 5 min)..."
+  if CODEX_CLI_NOVA="$(subir_codex_cli_nativo "$CODEX_BIN_PATH" "$LEON_DATA_DIR" \
+      "$LEON_CODEX_CLI_MINIMA" "$TX_ID" "$NODE_BIN")" && [ -n "$CODEX_CLI_NOVA" ]; then
+    LEON_CODEX_CLI_VERSION="$CODEX_CLI_NOVA"
+    CODEX_BIN_PATH="$LEON_DATA_DIR/codex-cli/releases/$LEON_CODEX_CLI_VERSION/bin/codex"
+    CODEX_CLI_SUBIU=1
+    say "   motor Codex agora na $LEON_CODEX_CLI_VERSION."
+  else
+    say "   o motor Codex não subiu agora; sigo com a $LEON_CODEX_CLI_VERSION e tento de novo no próximo /atualiza."
+  fi
+fi
+
 rewrite_runtime_env "$STAGE/.env" \
   || fatal "o .env atual não pôde ser reduzido à configuração suportada; runtime preservado."
 
@@ -2561,6 +2774,18 @@ if ! pgrep -x cron >/dev/null 2>&1 && ! pgrep -x crond >/dev/null 2>&1 \
   notify_from_runtime "$INSTALL_DIR" "⚠️ Me atualizei, mas o agendador da tua VPS (o cron) esta parado e nao consegui religar sozinho — sem ele o backup diario e a rede de seguranca nao rodam. Me chama que eu te passo como destravar (e 1 comando)." "$THREAD_ARG" "$CHAT_ARG" || true
 else
   rm -f "$INSTALL_DIR/.cron-morto.json" 2>/dev/null || true
+fi
+# 3z) AVISO DO MOTOR QUE NAO SUBIU (2.4.34): o update do bridge foi inteiro, mas o CLI ficou
+# na versao antiga (sem rede, npm fora do ar, pacote parcial). Nada quebrou — so o Astra segue
+# indisponivel, e o gate do /modelo em runtime ja explica isso se o dono pedir. Aviso UMA vez,
+# sem susto, dizendo que a proxima tentativa e automatica. Se subiu, apago o rastro.
+if [ "$CODEX_CLI_ABAIXO_DA_MINIMA" = "1" ] && [ "$CODEX_CLI_SUBIU" = "0" ]; then
+  printf '{"visto_em":%s,"instalada":"%s","minima":"%s"}\n' \
+    "$(date +%s)" "$LEON_CODEX_CLI_VERSION" "$LEON_CODEX_CLI_MINIMA" \
+    > "$INSTALL_DIR/.motor-antigo.json" 2>/dev/null || true
+  notify_from_runtime "$INSTALL_DIR" "✅ Atualizado! Tudo o que veio nesta versão já está no ar. Um detalhe só: o motor novo não subiu agora (deve ter sido rede). O Astra fica pra quando ele subir — eu tento de novo sozinho no próximo /atualiza, e você não precisa fazer nada." "$THREAD_ARG" "$CHAT_ARG" || true
+else
+  rm -f "$INSTALL_DIR/.motor-antigo.json" 2>/dev/null || true
 fi
 # 3a) AVISO DE LOGIN DO MODELO (02/set): o smoke do modelo virou aviso (não veto).
 # Se ele não passou lá na FASE 4, o update seguiu e chegou até aqui (versão nova no ar),
