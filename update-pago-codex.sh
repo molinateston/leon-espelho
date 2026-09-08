@@ -2408,6 +2408,7 @@ required = {
     "appserver/index.cjs",
     "appserver/package.json",
     "lib/onboarding.js",
+    "lib/seletor.cjs",
     "lib/inbound.js",
     "lib/meta-connect.js",
     "lib/meta-mcp-codex-filter.cjs",
