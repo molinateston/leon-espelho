@@ -518,6 +518,42 @@ if [ "$FINALIZE_MODE" -eq 0 ] && [ -z "${LEON_UPDATE_BLINDADO:-}" ] \
 fi
 # --- LEON-STAGE0-END ----------------------------------------------------------
 
+# ARQUIVOS DO RUNTIME NO MANIFESTO DE INTEGRIDADE — DEFINIDOS FORA DO CONGELADO.
+# A cabeca STAGE0 (linha 1 ate LEON-STAGE0-END) e a unica peca que nao se autocura na
+# frota: mexer nela obriga a recalcular o sha esperado da cabeca, e casa presa numa versao
+# velha para de alcancar a release nova. Por isso a lista de arquivos do runtime NAO e
+# editada la em cima. A cabeca fica byte a byte como estava, e a lista nova entra aqui
+# embaixo, junto com a redefinicao da funcao que a consome.
+#
+# A cabeca nunca chama write_runtime_files_manifest (conferido: nenhuma chamada entre a
+# linha 1 e o END); quem chama e o corpo, la pelo fim do arquivo. Entao redefinir a funcao
+# depois do END e seguro e vale sempre — em bash a ultima definicao ganha, e ela ja esta
+# no lugar muito antes da unica chamada.
+LEON_RUNTIME_FILES="bridge.cjs capabilities.json
+  appserver/adapter.cjs appserver/index.cjs
+  lib-motores/codex-appserver.cjs lib-motores/claude.cjs lib-motores/index.cjs
+  lib/onboarding.js lib/meta-connect.js lib/meta-graph.js lib/license.js
+  workers/piper.js workers/edge-tts.js workers/hostinger-health.cjs"
+
+# Esta e a definicao QUE VALE (redefine a gemea congelada la em cima, de proposito).
+# A unica diferenca e a lista: aqui ela sai de LEON_RUNTIME_FILES, e cai no default
+# historico se a variavel nao existir — updater antigo que so tenha a copia congelada
+# segue gravando exatamente o que gravava antes.
+write_runtime_files_manifest() {
+  local stage="$1"
+  local destination="$stage/.leon-runtime-files.sha256"
+  local rel
+  : > "$destination"
+  for rel in ${LEON_RUNTIME_FILES:-bridge.cjs capabilities.json \
+    appserver/adapter.cjs appserver/index.cjs \
+    lib-motores/codex-appserver.cjs lib/onboarding.js lib/meta-connect.js lib/meta-graph.js lib/license.js \
+    workers/piper.js workers/edge-tts.js workers/hostinger-health.cjs}; do
+    [ -f "$stage/$rel" ] && [ ! -L "$stage/$rel" ] || continue
+    printf '%s  %s\n' "$(sha256sum "$stage/$rel" | awk '{print $1}')" "$rel" >> "$destination"
+  done
+  chmod 0600 "$destination"
+}
+
 validate_runtime_roots() {
   local require_exists="${1:-0}"
   "$PYTHON_BIN" - "$require_exists" "$HOME" "$INSTALL_DIR" "$LEON_DATA_DIR" "$CODEX_HOME_DIR" \
@@ -1214,21 +1250,25 @@ rewrite_runtime_env() {
   # Preserva o modelo já validado no login (a prova pós-login testa em ordem
   # e grava o que respondeu): a conta ChatGPT do cliente pode não ter o "sol",
   # e o update não pode voltar pro default sobrescrevendo o que já funciona.
-  local codex_model="${CODEX_MODEL_EFETIVO:-gpt-5.6-sol}" existing_model
+  # O default depende do motor: cada um tem os modelos dele, e cair no default do outro
+  # deixaria a casa apontando pra um nome que o motor de pe nem conhece.
+  local codex_model existing_model
+  if [ "$LEON_ENGINE_CASA" = claude ]; then
+    codex_model="claude-opus-5"
+  else
+    codex_model="${CODEX_MODEL_EFETIVO:-gpt-5.6-sol}"
+  fi
   if existing_model="$(safe_env_value "$env_file" CODEX_MODEL 2>/dev/null)" \
     && printf '%s' "$existing_model" | grep -qE '^[A-Za-z0-9._-]+$'; then
     codex_model="$existing_model"
   fi
   filter_user_env "$env_file" "$temp" || return 1
+  # O MOTOR DA CASA e escolha do dono e o update nao a desfaz. Enquanto estas duas linhas
+  # eram cravadas em "codex", um /atualiza numa casa do outro motor a devolvia calada pro
+  # motor historico: o servico subia no motor errado sem ninguem pedir e sem nada avisar.
   cat >> "$temp" <<EOF
-ENGINE=codex
-ENGINE_DEFAULT=codex
-LEON_CODEX_ONLY=1
-CODEX_APP_SERVER=1
-CODEX_HOME=$CODEX_HOME_DIR
-CODEX_MODEL=$codex_model
-CODEX_REASONING_EFFORT=high
-LEON_CODEX_CLI_VERSION=$LEON_CODEX_CLI_VERSION
+ENGINE=$LEON_ENGINE_CASA
+ENGINE_DEFAULT=$LEON_ENGINE_CASA
 LEON_DATA_DIR=$LEON_DATA_DIR
 BRAIN_DIR=$LEON_DATA_DIR/brain
 PERSONA_DIR=$LEON_DATA_DIR/persona
@@ -1249,10 +1289,28 @@ PIPER_BIN=$LEON_DATA_DIR/piper-venv/bin/piper
 PIPER_MODEL=$LEON_DATA_DIR/voices/piper/pt_BR-faber-medium.onnx
 MEMVIVA_FILE=$LEON_DATA_DIR/brain/MEMORIA-VIVA.md
 ASSUNTOS_FILE=$LEON_DATA_DIR/brain/ASSUNTOS-VIVOS.md
-CODEX_BIN=$CODEX_BIN_PATH
 TTS_PROVIDER=edgetts
 VOICE_REPLY=mirror
 EOF
+  # As chaves do CLI de cada motor entram so na casa que usa aquele CLI. Escrever as do
+  # Codex numa casa do outro motor apontaria pra um binario que nao existe ali.
+  if [ "$LEON_ENGINE_CASA" = codex ]; then
+    cat >> "$temp" <<EOF
+LEON_CODEX_ONLY=1
+CODEX_APP_SERVER=1
+CODEX_HOME=$CODEX_HOME_DIR
+CODEX_BIN=$CODEX_BIN_PATH
+CODEX_MODEL=$codex_model
+CODEX_REASONING_EFFORT=high
+LEON_CODEX_CLI_VERSION=$LEON_CODEX_CLI_VERSION
+EOF
+  else
+    cat >> "$temp" <<EOF
+CLAUDE_CONFIG_DIR=$LEON_DATA_DIR/claude
+CODEX_MODEL=$codex_model
+CODEX_REASONING_EFFORT=high
+EOF
+  fi
   chmod 0600 "$temp"
   mv -f -- "$temp" "$env_file"
 }
@@ -1689,6 +1747,8 @@ health_smoke() {
   [ -s "$live/appserver/adapter.cjs" ] || return 1
   [ -s "$live/lib/onboarding.js" ] || return 1
   [ -s "$live/lib-motores/codex-appserver.cjs" ] || return 1
+  [ -s "$live/lib-motores/claude.cjs" ] || return 1
+  [ -s "$live/lib-motores/index.cjs" ] || return 1
   [ -s "$live/smoke/appserver-smoke.cjs" ] || return 1
   [ -s "$live/workers/piper.js" ] || return 1
   [ "$(sha256sum "$live/bridge.cjs" | awk '{print $1}')" = "$expected" ] || return 1
@@ -1697,6 +1757,8 @@ health_smoke() {
   "$NODE_BIN" --check "$live/appserver/adapter.cjs" >/dev/null 2>&1 || return 1
   "$NODE_BIN" --check "$live/lib/onboarding.js" >/dev/null 2>&1 || return 1
   "$NODE_BIN" --check "$live/lib-motores/codex-appserver.cjs" >/dev/null 2>&1 || return 1
+  "$NODE_BIN" --check "$live/lib-motores/claude.cjs" >/dev/null 2>&1 || return 1
+  "$NODE_BIN" --check "$live/lib-motores/index.cjs" >/dev/null 2>&1 || return 1
   "$NODE_BIN" --check "$live/workers/piper.js" >/dev/null 2>&1 || return 1
   # ANTI-CORRIDA (04/09, tx 20260904T135046Z rolled-back a toa): medir o MainPID
   # enquanto a unit ainda esta em 'activating'/'deactivating' pega o pid do ciclo
@@ -2028,7 +2090,10 @@ if [ ! -d "$INSTALL_DIR" ] || [ -L "$INSTALL_DIR" ]; then
   fatal "a instalação atual não é um diretório real."
 fi
 [ -f "$ENV_FILE" ] || fatal "não achei o arquivo de configuração do LEON."
-case "$CONFIG_PATH" in "$HOME"/*) ;; *) fatal "o perfil Codex está fora da home esperada." ;; esac
+# O caminho do perfil e conferido sempre (e derivado do HOME), mas a EXISTENCIA dele so e
+# exigida na casa do motor que o usa. A checagem de caminho fica, porque e barata e vale
+# como sanidade do HOME em qualquer motor.
+case "$CONFIG_PATH" in "$HOME"/*) ;; *) fatal "o perfil do motor está fora da home esperada." ;; esac
 
 for required in "$CURL_BIN" tar "$PYTHON_BIN" sha256sum cp mv; do
   command -v "$required" >/dev/null 2>&1 || fatal "falta o programa obrigatório: $required."
@@ -2086,17 +2151,27 @@ SKILLS_BACKUP="$LEON_DATA_DIR/.skills-backup-$TX_ID"
 SKILLS_FAILED="$LEON_DATA_DIR/.skills-failed-$TX_ID"
 case "$LEON_SKILLS_DIR" in "$HOME"/*) ;; *) fatal "o catálogo de skills precisa ficar dentro da home." ;; esac
 validate_runtime_roots 0 || fatal "os caminhos de dados são inseguros ou passam por link simbólico; runtime preservado."
-if ! printf %s "$LEON_CODEX_CLI_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([_-][A-Za-z0-9.-]+)?$'; then
-  fatal "a versão esperada do Codex CLI é inválida."
-fi
-CODEX_BIN_PATH="$LEON_DATA_DIR/codex-cli/releases/$LEON_CODEX_CLI_VERSION/bin/codex"
-validate_dedicated_codex_cli "$CODEX_BIN_PATH" "$LEON_DATA_DIR" "$LEON_CODEX_CLI_VERSION" \
-  || fatal "o Codex CLI dedicado está ausente ou inseguro. Rode novamente o instalador Codex antes do /atualiza."
-INSTALLED_CODEX_VERSION="$(PATH="$(dirname "$NODE_BIN"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-  "$CODEX_BIN_PATH" --version 2>/dev/null \
-  | awk 'NR == 1 { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+([_-][A-Za-z0-9.-]+)?$/) { print $i; exit } }')"
-if [ "$INSTALLED_CODEX_VERSION" != "$LEON_CODEX_CLI_VERSION" ]; then
-  fatal "o Codex CLI está em '${INSTALLED_CODEX_VERSION:-ausente}', mas este runtime exige $LEON_CODEX_CLI_VERSION. Rode novamente o instalador Codex antes do /atualiza."
+# QUAL MOTOR ESTA CASA USA. O runtime, a base e a unit sao os MESMOS nos dois motores,
+# entao tudo acima vale igual. O que segue e do CLI do Codex: versao pinada e config.toml.
+# Numa casa que roda o outro motor esses arquivos nao existem, e exigi-los travava o
+# /atualiza dela sem motivo. Valor ausente ou desconhecido cai no motor historico, que e
+# o que toda casa instalada ate aqui usa.
+LEON_ENGINE_CASA="$(env_get_from "$ENV_READ_SAFE" ENGINE_DEFAULT)"
+[ -n "$LEON_ENGINE_CASA" ] || LEON_ENGINE_CASA="$(env_get_from "$ENV_READ_SAFE" ENGINE)"
+case "$LEON_ENGINE_CASA" in claude) ;; *) LEON_ENGINE_CASA=codex ;; esac
+if [ "$LEON_ENGINE_CASA" = codex ]; then
+  if ! printf %s "$LEON_CODEX_CLI_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([_-][A-Za-z0-9.-]+)?$'; then
+    fatal "a versão esperada do Codex CLI é inválida."
+  fi
+  CODEX_BIN_PATH="$LEON_DATA_DIR/codex-cli/releases/$LEON_CODEX_CLI_VERSION/bin/codex"
+  validate_dedicated_codex_cli "$CODEX_BIN_PATH" "$LEON_DATA_DIR" "$LEON_CODEX_CLI_VERSION" \
+    || fatal "o Codex CLI dedicado está ausente ou inseguro. Rode novamente o instalador Codex antes do /atualiza."
+  INSTALLED_CODEX_VERSION="$(PATH="$(dirname "$NODE_BIN"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    "$CODEX_BIN_PATH" --version 2>/dev/null \
+    | awk 'NR == 1 { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+([_-][A-Za-z0-9.-]+)?$/) { print $i; exit } }')"
+  if [ "$INSTALLED_CODEX_VERSION" != "$LEON_CODEX_CLI_VERSION" ]; then
+    fatal "o Codex CLI está em '${INSTALLED_CODEX_VERSION:-ausente}', mas este runtime exige $LEON_CODEX_CLI_VERSION. Rode novamente o instalador Codex antes do /atualiza."
+  fi
 fi
 if [ "$TEST_MODE" = "1" ]; then
   case "$CENTRAL" in http://*|https://*) ;; *) fatal "endereço da central inválido." ;; esac
@@ -2385,8 +2460,13 @@ if _m="$(safe_env_value "$INSTALL_DIR/.env" CODEX_MODEL 2>/dev/null)" \
   CODEX_MODEL_EFETIVO="$_m"
 fi
 unset _m
-write_codex_config_candidate "$TX_DIR/config.candidate" \
-  || fatal "não consegui gerar o perfil Codex root-deny canônico."
+# O config.toml e do CLI do Codex. Numa casa que roda o outro motor ele nao existe e nao
+# faz falta: sem candidato gerado, o commit la embaixo simplesmente nao o aplica (o passo
+# ja era condicionado ao arquivo existir).
+if [ "$LEON_ENGINE_CASA" = codex ]; then
+  write_codex_config_candidate "$TX_DIR/config.candidate" \
+    || fatal "não consegui gerar o perfil Codex root-deny canônico."
+fi
 
 # O bridge v2 depende do adapter e do shim da mesma versão. Baixamos um bundle
 # indivisível, validamos hash, lista exata e sintaxe, e só então sobrepomos o stage.
@@ -2414,6 +2494,8 @@ required = {
     "lib/meta-mcp-codex-filter.cjs",
     "lib/meta-account-guard.cjs",
     "lib-motores/codex-appserver.cjs",
+    "lib-motores/claude.cjs",
+    "lib-motores/index.cjs",
     "smoke/appserver-smoke.cjs",
     "workers/piper.js",
 }
@@ -2460,16 +2542,17 @@ if d.get("schema")!=1 or d.get("kind")!="leon-codex-capabilities": raise SystemE
 if d.get("attachments",{}).get("curatedOfficePreconversion") is not False: raise SystemExit(1)
 if d.get("optionalNotProvisionedByCore",{}).get("googleWorkspace") is not False: raise SystemExit(1)
 PY
-for runtime_js in bridge.cjs appserver/adapter.cjs lib/onboarding.js lib/inbound.js lib/meta-connect.js lib/meta-mcp-codex-filter.cjs lib/meta-account-guard.cjs lib-motores/codex-appserver.cjs smoke/appserver-smoke.cjs workers/piper.js; do
+for runtime_js in bridge.cjs appserver/adapter.cjs lib/onboarding.js lib/inbound.js lib/meta-connect.js lib/meta-mcp-codex-filter.cjs lib/meta-account-guard.cjs lib-motores/codex-appserver.cjs lib-motores/claude.cjs lib-motores/index.cjs smoke/appserver-smoke.cjs workers/piper.js; do
   "$NODE_BIN" --check "$BUNDLE_EXTRACT/$runtime_js" >/dev/null 2>&1 \
     || fatal "o runtime Codex v2 contém JavaScript inválido: $runtime_js."
 done
 LEGACY_NAME='open''claw'
 if LC_ALL=C grep -Rqi -- "$LEGACY_NAME" "$BUNDLE_EXTRACT" \
-   || LC_ALL=C grep -Rq -- 'bypassPermissions' "$BUNDLE_EXTRACT" \
+   || LC_ALL=C grep -Rq --exclude='claude.cjs' -- 'bypassPermissions' "$BUNDLE_EXTRACT" \
    || LC_ALL=C grep -R -l --binary-files=text -- "$DANGEROUS_FLAG" "$BUNDLE_EXTRACT" >/dev/null 2>&1 \
    || ! grep -q 'const LEON_CODEX_ONLY = true' "$BUNDLE_EXTRACT/bridge.cjs" \
-   || ! grep -q 'createCodexAppServerMotor' "$BUNDLE_EXTRACT/bridge.cjs"; then
+   || ! grep -q 'criaMotor' "$BUNDLE_EXTRACT/bridge.cjs" \
+   || ! [ -s "$BUNDLE_EXTRACT/lib-motores/index.cjs" ]; then
   fatal "o runtime Codex v2 reprovou a auditoria de identidade ou permissão."
 fi
 cp -a -- "$BUNDLE_EXTRACT"/. "$STAGE"/
@@ -2538,6 +2621,8 @@ find "$STAGE" -xdev -type f -exec chmod go-rwx {} +
 [ -s "$STAGE/appserver/adapter.cjs" ] \
   && [ -s "$STAGE/lib/onboarding.js" ] \
   && [ -s "$STAGE/lib-motores/codex-appserver.cjs" ] \
+  && [ -s "$STAGE/lib-motores/claude.cjs" ] \
+  && [ -s "$STAGE/lib-motores/index.cjs" ] \
   && [ -s "$STAGE/smoke/appserver-smoke.cjs" ] \
   && [ -s "$STAGE/workers/piper.js" ] \
   && [ -s "$STAGE/capabilities.json" ] \

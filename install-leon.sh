@@ -75,6 +75,9 @@ if [ -z "$LEON_ENGINE" ] && [ "$MOCK_MODE" != "1" ] && [ -t 0 ]; then
   esac
 fi
 [ -z "$LEON_ENGINE" ] && LEON_ENGINE=claude
+# Modelo padrao do segundo motor. Mesmo nome que o bridge oferece no /modelo; o dono
+# troca depois pelo proprio comando, sem reinstalar nada.
+LEON_CLAUDE_MODEL="${LEON_CLAUDE_MODEL:-claude-opus-5}"
 if [ "$LEON_ENGINE" != "claude" ] && [ "$LEON_ENGINE" != "codex" ]; then
   echo "ERRO: LEON_ENGINE invalido (recebi '$LEON_ENGINE'); use 'claude' ou 'codex'." >&2
   exit 1
@@ -616,7 +619,7 @@ write_runtime_files_manifest() {
   : > "$destination"
   for rel in bridge.cjs capabilities.json \
     appserver/adapter.cjs appserver/index.cjs \
-    lib-motores/codex-appserver.cjs lib/onboarding.js lib/meta-connect.js lib/meta-graph.js lib/license.js \
+    lib-motores/codex-appserver.cjs lib-motores/claude.cjs lib-motores/index.cjs lib/onboarding.js lib/meta-connect.js lib/meta-graph.js lib/license.js \
     workers/piper.js workers/edge-tts.js workers/hostinger-health.cjs; do
     [ -f "$stage/$rel" ] && [ ! -L "$stage/$rel" ] || continue
     printf '%s  %s\n' "$(sha256sum "$stage/$rel" | awk '{print $1}')" "$rel" >> "$destination"
@@ -753,7 +756,12 @@ provar_modelo_codex() {
 # Ramo Claude = unit simples historica, no Node do sistema.
 write_service_unit() {
   local output="$1" user="$2" install_dir="$3" node_bin="$4" engine="$5"
-  if [ "$engine" = codex ]; then
+  # FASE B: a unit ENDURECIDA vale pros dois motores. Ela e a mesma peca de seguranca
+  # (sem privilegio novo, sem device, capacidades zeradas, teto de memoria e tarefa), e
+  # o unico ponto que muda entre motores e o binario do Node e o diretorio. Deixar o
+  # segundo motor na unit simples historica seria servir a mesma casa com metade da
+  # protecao, e o validate_service_unit do atualizador reprova quem nao tem o perfil.
+  if [ "$engine" = codex ] || [ "$engine" = claude ]; then
     cat > "$output" <<EOF
 [Unit]
 Description=Projeto LEON · Socio IA 24x7
@@ -1569,6 +1577,8 @@ allowed_files = {
     "lib/meta-mcp-codex-filter.cjs",
     "lib/meta-account-guard.cjs",
     "lib-motores/codex-appserver.cjs",
+    "lib-motores/claude.cjs",
+    "lib-motores/index.cjs",
     "smoke/appserver-smoke.cjs",
     "workers/piper.js",
 }
@@ -1643,7 +1653,12 @@ PY
 }
 
 if [ "$MOCK_MODE" != "1" ]; then
-  if [ "$LEON_ENGINE" = codex ]; then
+  # FASE B: os DOIS motores recebem a MESMA base e o MESMO bundle assinados. Antes o
+  # ramo do segundo motor caia no /download antigo, sem manifesto assinado nem
+  # conferencia de artefato, entao a mesma casa tinha duas historias de integridade.
+  # A unica diferenca real entre os ramos e o CLI do fabricante, que ja foi instalado
+  # la em cima. O manifest-claude e o /download deixam de ser usados por este ramo.
+  if [ "$LEON_ENGINE" = codex ] || [ "$LEON_ENGINE" = claude ]; then
     baixa_runtime_codex
   else
     echo ""
@@ -1968,21 +1983,13 @@ VOICE_PY=$LEON_DATA_DIR/whisper-venv/bin/python3
 EOF
 chmod 600 .env
 
-# RAMO C: motor Codex ganha .env estendido + dirs de dados. Mesmo conjunto de
-# chaves que o install-codex.sh gravava e que o update-pago-codex.sh regrava:
-# CODEX_BIN e o binario PINADO (unico caminho que o bridge aceita),
-# LEON_CODEX_CLI_VERSION cravada, CODEX_MODEL = o que respondeu na prova (A8).
-# O motor Claude nao precisa dessas chaves, entao so o codex entra aqui.
-if [ "$LEON_ENGINE" = codex ]; then
-  CODEX_BIN_ENV="${LEON_CODEX_BIN_RESOLVED:-$LEON_DATA_DIR/codex-cli/releases/$LEON_CODEX_CLI_VERSION/bin/codex}"
+# RAMO C: as chaves de CAMINHO valem pros DOIS motores. O agente e o mesmo em
+# qualquer motor, e ele le brain, persona, skills, area de trabalho e saida de
+# missao pelos mesmos caminhos. Enquanto este bloco era so do Codex, uma casa no
+# outro motor subia sem BRAIN_DIR e sem PERSONA_DIR, ou seja, sem a memoria e sem a
+# persona do dono, e ninguem avisava.
+if [ "$LEON_ENGINE" = codex ] || [ "$LEON_ENGINE" = claude ]; then
   cat >> .env <<EOF
-LEON_CODEX_ONLY=1
-CODEX_APP_SERVER=1
-CODEX_HOME=$LEON_CODEX_HOME
-CODEX_BIN=$CODEX_BIN_ENV
-CODEX_MODEL=$CODEX_MODEL
-CODEX_REASONING_EFFORT=high
-LEON_CODEX_CLI_VERSION=$LEON_CODEX_CLI_VERSION
 LEON_DATA_DIR=$LEON_DATA_DIR
 BRAIN_DIR=$LEON_DATA_DIR/brain
 PERSONA_DIR=$LEON_DATA_DIR/persona
@@ -2004,10 +2011,43 @@ MEMVIVA_FILE=$LEON_DATA_DIR/brain/MEMORIA-VIVA.md
 ASSUNTOS_FILE=$LEON_DATA_DIR/brain/ASSUNTOS-VIVOS.md
 EOF
   chmod 600 .env
-  mkdir -p "$LEON_CODEX_HOME" "$LEON_TMPDIR" "$LEON_DATA_DIR/brain" \
+  mkdir -p "$LEON_TMPDIR" "$LEON_DATA_DIR/brain" \
     "$LEON_DATA_DIR/persona" "$LEON_WORK_AREA" "$LEON_STATE_DIR" "$LEON_MISSIONS_DIR" \
     "$LEON_PROMISES_DIR" "$LEON_MISSION_OUTPUT_DIR"
-  chmod 700 "$LEON_DATA_DIR" "$LEON_CODEX_HOME" "$LEON_TMPDIR" "$LEON_STATE_DIR" "$LEON_MISSION_OUTPUT_DIR"
+  chmod 700 "$LEON_DATA_DIR" "$LEON_TMPDIR" "$LEON_STATE_DIR" "$LEON_MISSION_OUTPUT_DIR"
+fi
+
+# Chaves do segundo motor: a casa dele (onde moram transcript de sessao e o arquivo do
+# dossie) e o modelo padrao. O CLI do fabricante ja foi instalado la em cima; aqui so
+# apontamos onde ele guarda estado, fora do HOME do usuario que roda o servico.
+if [ "$LEON_ENGINE" = claude ]; then
+  cat >> .env <<EOF
+CLAUDE_CONFIG_DIR=$LEON_DATA_DIR/claude
+CODEX_MODEL=$LEON_CLAUDE_MODEL
+CODEX_REASONING_EFFORT=high
+EOF
+  chmod 600 .env
+  mkdir -p "$LEON_DATA_DIR/claude"
+  chmod 700 "$LEON_DATA_DIR/claude"
+fi
+
+# Daqui pra baixo e so do motor Codex: o binario PINADO (unico caminho que o bridge
+# aceita), a versao cravada do CLI, o modelo que respondeu na prova (A8) e o
+# config.toml do proprio Codex. O outro motor nao tem nada disso.
+if [ "$LEON_ENGINE" = codex ]; then
+  CODEX_BIN_ENV="${LEON_CODEX_BIN_RESOLVED:-$LEON_DATA_DIR/codex-cli/releases/$LEON_CODEX_CLI_VERSION/bin/codex}"
+  cat >> .env <<EOF
+LEON_CODEX_ONLY=1
+CODEX_APP_SERVER=1
+CODEX_HOME=$LEON_CODEX_HOME
+CODEX_BIN=$CODEX_BIN_ENV
+CODEX_MODEL=$CODEX_MODEL
+CODEX_REASONING_EFFORT=high
+LEON_CODEX_CLI_VERSION=$LEON_CODEX_CLI_VERSION
+EOF
+  chmod 600 .env
+  mkdir -p "$LEON_CODEX_HOME"
+  chmod 700 "$LEON_CODEX_HOME"
   # Decisão do dono 04/09: mesmo modo do mestre, acesso total. Provado no 99: com
   # default_permissions = "leon" + seções [permissions.leon.*] o Codex mantém o
   # isolamento ligado mesmo sob sandbox_mode = "danger-full-access" (cai em
