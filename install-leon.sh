@@ -106,7 +106,7 @@ LEON_STATE_DIR="${LEON_STATE_DIR:-$LEON_DATA_DIR/state}"
 LEON_MISSIONS_DIR="${LEON_MISSIONS_DIR:-$LEON_STATE_DIR/missions}"
 LEON_PROMISES_DIR="${LEON_PROMISES_DIR:-$LEON_STATE_DIR/promises}"
 LEON_MISSION_OUTPUT_DIR="${LEON_MISSION_OUTPUT_DIR:-$LEON_DATA_DIR/mission-output}"
-CODEX_MODEL="${CODEX_MODEL:-gpt-5.6-sol}"
+CODEX_MODEL="${CODEX_MODEL:-gpt-5.6}"
 LEON_RELEASE_TRUST_FINGERPRINT='eb70521f5e4dd9bb1cd11e6ceb0b2bddd65596558322908a2d04fd3dec5cbe08'
 
 # Versoes homologadas do runtime dedicado do Codex: as mesmas que o
@@ -723,7 +723,7 @@ provar_modelo_codex() {
     vistos="$vistos$m "
     saida=$(mktemp); ultima="$saida.ultima"
     rc=0
-    codex_env_limpo --timeout 90 exec --skip-git-repo-check --ephemeral -C "$LEON_WORK_AREA" \
+    codex_env_limpo --timeout 90 exec --skip-git-repo-check --ephemeral --dangerously-bypass-approvals-and-sandbox -C "$LEON_WORK_AREA" \
       -m "$m" -o "$ultima" "responda apenas OK" >"$saida" 2>&1 || rc=$?
     if [ "$rc" -eq 0 ] && [ -s "$ultima" ]; then
       rm -f -- "$saida" "$ultima"
