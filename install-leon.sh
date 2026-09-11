@@ -96,10 +96,13 @@ LEON_DATA_DIR="${LEON_DATA_DIR:-$HOME/.leon}"
 LEON_CODEX_HOME="${LEON_CODEX_HOME:-$LEON_DATA_DIR/codex}"
 if [ "$LEON_ENGINE" = codex ]; then
   LEON_SKILLS_DIR="${LEON_SKILLS_DIR:-$LEON_DATA_DIR/skills}"
-PERSONA_DIR_LOCAL="${PERSONA_DIR_LOCAL:-$LEON_DATA_DIR/persona}"
 else
   LEON_SKILLS_DIR="${LEON_SKILLS_DIR:-$HOME/.claude/skills}"
 fi
+# PERSONA_DIR_LOCAL vale pros DOIS motores (o bridge le a persona/nucleo dela em ambos). Estava DENTRO
+# do ramo codex por engano (indentacao torta) -> instalacao CLAUDE dava "PERSONA_DIR_LOCAL: unbound
+# variable" na L1546 sob set -u e travava TODA instalacao claude (bug do Bruno 11/09). Movido pra fora.
+PERSONA_DIR_LOCAL="${PERSONA_DIR_LOCAL:-$LEON_DATA_DIR/persona}"
 LEON_TMPDIR="${LEON_TMPDIR:-$LEON_DATA_DIR/tmp}"
 LEON_WORK_AREA="${LEON_WORK_AREA:-$HOME/trabalho}"
 LEON_STATE_DIR="${LEON_STATE_DIR:-$LEON_DATA_DIR/state}"
