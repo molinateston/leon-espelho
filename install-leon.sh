@@ -1573,6 +1573,12 @@ PY
   if ! python3 - "$BUNDLE_TMP" <<'PY'
 import posixpath, sys, tarfile
 
+# allowed_files: DEVE bater 1:1 com o RUNTIME_FILES do build-release-production.sh. Os 6 ultimos
+# (integracoes/sala-contrato/seletor/esteiras/skill-triggers/medir-tokens) foram adicionados ao bundle
+# em 09-10/09 (o bridge faz require top-level deles, sem eles morre em MODULE_NOT_FOUND), mas ESTA lista
+# ficou pra tras -> o install rejeitava por igualdade exata (seen==allowed_files) com "bundle Codex
+# incompleto ou com caminho inseguro" e travava TODA instalacao NOVA (bug do Bruno 11/09). O updater
+# ja aceitava (usa required<=seen, subconjunto), por isso a frota atualizava mas ninguem instalava novo.
 allowed_files = {
     "bridge.cjs",
     "capabilities.json",
@@ -1584,11 +1590,17 @@ allowed_files = {
     "lib/meta-connect.js",
     "lib/meta-mcp-codex-filter.cjs",
     "lib/meta-account-guard.cjs",
+    "lib/integracoes.cjs",
+    "lib/sala-contrato.cjs",
+    "lib/seletor.cjs",
+    "lib/esteiras.json",
+    "lib/skill-triggers.json",
     "lib-motores/codex-appserver.cjs",
     "lib-motores/claude.cjs",
     "lib-motores/index.cjs",
     "smoke/appserver-smoke.cjs",
     "workers/piper.js",
+    "workers/medir-tokens.py",
 }
 allowed_dirs = {"appserver", "lib", "lib-motores", "smoke", "workers"}
 try:
