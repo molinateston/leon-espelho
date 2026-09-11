@@ -112,7 +112,7 @@ LEON_RELEASE_TRUST_FINGERPRINT='eb70521f5e4dd9bb1cd11e6ceb0b2bddd65596558322908a
 # Versoes homologadas do runtime dedicado do Codex: as mesmas que o
 # release-manifest declara e que o update-pago-codex.sh valida.
 : "${LEON_NODE_VERSION:=22.22.0}"
-: "${LEON_CODEX_CLI_VERSION:=0.153.3}"
+: "${LEON_CODEX_CLI_VERSION:=0.154.0}"
 : "${LEON_NODE_ROOT:=}"
 : "${LEON_CODEX_CLI_ROOT:=}"
 : "${LEON_NODE_BIN_RESOLVED:=}"
@@ -1485,7 +1485,7 @@ if data["schema"]!=2 or data["kind"]!="leon-codex-release" or data["channel"]!="
 if data["keyFingerprint"]!=fingerprint: raise SystemExit(1)
 version_re=re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
 if not version_re.fullmatch(str(data["version"])) or not version_re.fullmatch(str(data["minVersion"])): raise SystemExit(1)
-if data["codexCliVersion"]!="0.153.3" or data["nodeVersion"]!="22.22.0": raise SystemExit(1)
+if data["codexCliVersion"]!="0.154.0" or data["nodeVersion"]!="22.22.0": raise SystemExit(1)
 artifacts=data["artifacts"]
 if set(artifacts)!={"base","bundle","skills","updater"}: raise SystemExit(1)
 expected={
