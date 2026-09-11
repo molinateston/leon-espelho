@@ -1,4 +1,372 @@
 #!/usr/bin/env bash
+# ===== LIGA-CODEX (11/09): liga o 2o motor numa casa que JA roda. INERTE na instalacao normal; =====
+# ===== so entra com LEON_LIGA_MOTOR=codex. Provado em container (E2E). Fonte: liga-codex.sh no repo. =====
+if [ "${LEON_LIGA_MOTOR:-}" = codex ]; then
+# =============================================================================
+# liga-codex.sh — ADICIONA o motor Codex numa casa LEON que JA roda (mono, motor
+# claude), SEM reinstalar e SEM derrubar o LEON no ar. Depois o dono da /codex no
+# Telegram e o agente troca pro Codex; /claude volta. Multimotor de fato, do jeito
+# do mestre.
+#
+# COMO FUNCIONA (desenho Fable, validado Astra — wf_7eb3306a-dfe, 11/09):
+#  - Roda COMO O USER leon (os prefixos dedicados sao 0700 dono leon; o auth.json,
+#    o .env e o config.toml tem que nascer dono leon). SO o passo do PATH do
+#    servico (SEC7) precisa de root.
+#  - REUSA as funcoes JA PROVADAS do install-leon.sh (nao reimplementa): extrai as
+#    13 funcoes de runtime/login por awk e sourcea SO o extrato (nao roda o install
+#    inteiro — ele nao tem guarda main e reinstalaria a casa).
+#  - So PREENCHE valores de chaves que o install ja escreve (todas na allowlist do
+#    bridge; zero chave nova = zero crash-loop). NAO mexe em ENGINE_DEFAULT (fica
+#    claude): o /codex grava motor-escolhido.json, que vence o .env.
+#  - Se o login/prova do Codex falhar, ABORTA sem tocar no .env: o LEON claude fica
+#    intacto. Idempotente: rodar 2x nao dispara device-auth de novo.
+#
+# USO (no terminal do navegador da casa do cliente):
+#   sudo -iu leon bash -c 'curl -fsSL https://licenca.leonardomolina.com.br/liga-codex.sh | bash'
+#   (o -i reseta HOME=/home/leon — obrigatorio, senao o runtime iria pra /root)
+# =============================================================================
+set -uo pipefail
+# Tudo que este script cria nasce privado (0700/0600). A validacao dos prefixos
+# dedicados (install-leon.sh) rejeita diretorio com escrita de grupo/outros; um
+# login shell no Ubuntu vem com umask 002 e criaria .leon 775 -> reprova. Nao
+# depender do umask de quem chama.
+umask 077
+
+# ------------------------------------------------------------
+# SEC0 · Contexto seguro: sou o user leon, com HOME certo?
+#   (FURO-1 Astra: sudo -u leon sem -i deixa HOME=/root -> LEON_DATA_DIR=/root/.leon
+#    e ensure_node_runtime reprova por case "$target_home"/*. Exijo HOME correto.)
+# ------------------------------------------------------------
+LEON_USER="${LEON_USER:-leon}"
+CENTRAL="${LEON_CENTRAL:-https://licenca.leonardomolina.com.br}"
+SYS_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+: "${LEON_NODE_VERSION:=22.22.0}"
+: "${LEON_LIGA_FASE:=}"
+
+# SEC0-root · O terminal do navegador do cliente e root. Como root, este script
+# pivota pro user leon (mesmo runuser/env -i do install-leon.sh L1296) pra fazer
+# runtime+login+.env+config (SEC1-6, tudo dono leon), e volta como root pra aplicar
+# o PATH do servico e o restart (SEC7). Um comando, sem copiar-colar.
+if [ "$(id -u)" -eq 0 ]; then
+  id "$LEON_USER" >/dev/null 2>&1 || { echo "ERRO: usuario '$LEON_USER' nao existe; a casa LEON nao esta instalada aqui." >&2; exit 1; }
+  LEON_HOME="$(getent passwd "$LEON_USER" | cut -d: -f6)"
+  [ -n "$LEON_HOME" ] && [ -d "$LEON_HOME" ] || { echo "ERRO: home de '$LEON_USER' nao encontrada." >&2; exit 1; }
+  SELF="$LEON_HOME/liga-codex.sh"
+  if [ -f "${BASH_SOURCE[0]:-}" ]; then
+    [ "$(readlink -f -- "${BASH_SOURCE[0]}")" = "$(readlink -f -- "$SELF" 2>/dev/null || true)" ] || cp -- "${BASH_SOURCE[0]}" "$SELF"
+  else
+    curl -fsSL "$CENTRAL/install-leon.sh" -o "$SELF" || { echo "ERRO: nao baixei $CENTRAL/liga-codex.sh." >&2; exit 1; }
+  fi
+  chown "$LEON_USER:$LEON_USER" "$SELF"; chmod 0700 "$SELF"
+  echo "== liga-codex · fase root: passando pro usuario '$LEON_USER' =="
+  runuser -u "$LEON_USER" -- env -i \
+    HOME="$LEON_HOME" USER="$LEON_USER" LOGNAME="$LEON_USER" PATH="$SYS_PATH" \
+    LANG=C.UTF-8 LC_ALL=C.UTF-8 TERM="${TERM:-dumb}" \
+    LEON_USER="$LEON_USER" LEON_LIGA_FASE=user LEON_CENTRAL="$CENTRAL" \
+    LEON_DIR="${LEON_DIR:-}" LEON_DATA_DIR="${LEON_DATA_DIR:-}" \
+    LEON_NODE_VERSION="$LEON_NODE_VERSION" LEON_CODEX_CLI_VERSION="${LEON_CODEX_CLI_VERSION:-}" \
+    CODEX_MODEL="${CODEX_MODEL:-}" \
+    LEON_INSTALLER_SRC="${LEON_INSTALLER_SRC:-$SELF}" LEON_LIGA_MOTOR=codex \
+    LEON_TEST_NODE_ONLY="${LEON_TEST_NODE_ONLY:-}" LEON_TEST_NODE_ARCH="${LEON_TEST_NODE_ARCH:-}" \
+    LEON_TEST_NODE_TGZ="${LEON_TEST_NODE_TGZ:-}" LEON_TEST_NODE_SHA256="${LEON_TEST_NODE_SHA256:-}" \
+    LEON_TEST_CODEX_CLI_ONLY="${LEON_TEST_CODEX_CLI_ONLY:-}" LEON_TEST_CODEX_ARCH="${LEON_TEST_CODEX_ARCH:-}" \
+    LEON_TEST_CODEX_MAIN_TGZ="${LEON_TEST_CODEX_MAIN_TGZ:-}" LEON_TEST_CODEX_PLATFORM_TGZ="${LEON_TEST_CODEX_PLATFORM_TGZ:-}" \
+    LEON_TEST_CODEX_MAIN_SHA512="${LEON_TEST_CODEX_MAIN_SHA512:-}" LEON_TEST_CODEX_PLATFORM_SHA512="${LEON_TEST_CODEX_PLATFORM_SHA512:-}" \
+    bash "$SELF" || { echo "ERRO: a fase do usuario '$LEON_USER' nao concluiu. Nada foi trocado no servico; o LEON atual segue no ar." >&2; exit 1; }
+  # SEC7 como root (sem sudo): o node dedicado que a fase user acabou de validar
+  NODE_DIR="${LEON_DATA_DIR:-$LEON_HOME/.leon}/node/releases/$LEON_NODE_VERSION/bin"
+  [ -x "$NODE_DIR/node" ] || { echo "ERRO: node dedicado nao encontrado em $NODE_DIR apos a fase user." >&2; exit 1; }
+  UNIT=leon-agente.service
+  DROPIN_DIR=/etc/systemd/system/$UNIT.d
+  DROPIN=$DROPIN_DIR/10-codex-path.conf
+  echo ">> aplicando PATH do runtime dedicado no servico e reiniciando..."
+  mkdir -p "$DROPIN_DIR"
+  printf '[Service]\nEnvironment="PATH=%s:%s"\n' "$NODE_DIR" "$SYS_PATH" > "$DROPIN"
+  chmod 0644 "$DROPIN"
+  systemctl daemon-reload
+  systemctl restart "$UNIT"
+  sleep 2
+  if systemctl is-active "$UNIT" >/dev/null 2>&1; then
+    echo "   ✅ Codex ligado. O servico voltou no ar."
+  else
+    echo "   ⚠️ o servico nao voltou active. Veja: journalctl -u $UNIT -n 50 --no-pager" >&2
+    exit 1
+  fi
+  echo ""
+  echo "== PRONTO. Agora no Telegram: mande /codex pra trocar pro Codex; /claude volta. =="
+  echo "   O motor padrao continua CLAUDE; nada da conversa foi perdido."
+  exit 0
+fi
+
+# SEC0-user · daqui pra baixo roda como leon (vindo da fase root, ou direto).
+_ME="$(id -un)"
+if [ "$_ME" != "$LEON_USER" ]; then
+  echo "ERRO: rode como root (o terminal do navegador) ou como o usuario '$LEON_USER'. Recebi '$_ME'." >&2
+  exit 1
+fi
+if [ "${HOME:-}" != "/home/$LEON_USER" ]; then
+  echo "ERRO: HOME='$HOME' inesperado; esperava /home/$LEON_USER. Use 'sudo -iu $LEON_USER' (login shell reseta HOME)." >&2
+  exit 1
+fi
+INSTALL_DIR="${LEON_DIR:-$HOME/socio-ia}"
+ENV_FILE="$INSTALL_DIR/.env"
+if [ ! -f "$ENV_FILE" ]; then
+  echo "ERRO: nao achei a casa LEON em $ENV_FILE. Este script liga o Codex numa casa JA instalada." >&2
+  exit 1
+fi
+WORK="$HOME/.leon/liga-codex"
+mkdir -p "$WORK"
+say(){ printf '%s\n' "$*"; }
+
+say "== liga-codex · adicionar o motor Codex nesta casa =="
+say "   casa: $INSTALL_DIR (o LEON atual segue no ar o tempo todo)"
+
+# ------------------------------------------------------------
+# SEC1 · Defaults de TODAS as vars que as funcoes leem bare, sob set -u.
+#   (FURO-2 Astra: faltar UM LEON_TEST_* estoura unbound = o bug que quebrou o
+#    Bruno. Copiado VERBATIM de install-leon.sh:95-135, byte a byte, ZERO abreviacao.)
+# ------------------------------------------------------------
+LEON_DATA_DIR="${LEON_DATA_DIR:-$HOME/.leon}"
+LEON_CODEX_HOME="${LEON_CODEX_HOME:-$LEON_DATA_DIR/codex}"
+LEON_WORK_AREA="${LEON_WORK_AREA:-$HOME/trabalho}"
+CODEX_MODEL="${CODEX_MODEL:-gpt-5.6-sol}"
+: "${LEON_NODE_VERSION:=22.22.0}"
+: "${LEON_CODEX_CLI_VERSION:=0.154.0}"
+: "${LEON_NODE_ROOT:=}"
+: "${LEON_CODEX_CLI_ROOT:=}"
+: "${LEON_NODE_BIN_RESOLVED:=}"
+: "${LEON_CODEX_BIN_RESOLVED:=}"
+: "${LEON_TEST_NODE_ONLY:=}"
+: "${LEON_TEST_NODE_ARCH:=}"
+: "${LEON_TEST_NODE_TGZ:=}"
+: "${LEON_TEST_NODE_SHA256:=}"
+: "${LEON_TEST_CODEX_CLI_ONLY:=}"
+: "${LEON_TEST_CODEX_ARCH:=}"
+: "${LEON_TEST_CODEX_MAIN_TGZ:=}"
+: "${LEON_TEST_CODEX_PLATFORM_TGZ:=}"
+: "${LEON_TEST_CODEX_MAIN_SHA512:=}"
+: "${LEON_TEST_CODEX_PLATFORM_SHA512:=}"
+: "${LEON_TEST_UNIT_ONLY:=}"
+: "${LEON_TEST_HANDOFF_ONLY:=}"
+
+# ------------------------------------------------------------
+# SEC2 · Extrai as 13 funcoes provadas do install-leon.sh e sourcea SO o extrato.
+#   (NAO 'source install-leon.sh': ele nao tem guarda main e reinstalaria a casa.)
+# ------------------------------------------------------------
+SRC=""
+# Fonte das funcoes: LEON_INSTALLER_SRC (bancada/prova) > a CENTRAL (fonte viva) >
+# a copia local da casa (~/install-leon.sh, do dia da instalacao — pode estar velha:
+# o pin do Codex 0.154.0 mudou depois da instalacao do Bruno, 11/09).
+if [ -n "${LEON_INSTALLER_SRC:-}" ] && [ -r "${LEON_INSTALLER_SRC:-}" ]; then
+  SRC="$LEON_INSTALLER_SRC"
+elif curl -fsSL -m 30 "$CENTRAL/install-leon.sh" -o "$WORK/install-leon.src" 2>/dev/null && [ -s "$WORK/install-leon.src" ]; then
+  SRC="$WORK/install-leon.src"
+elif [ -r "$HOME/install-leon.sh" ]; then
+  SRC="$HOME/install-leon.sh"
+  say "   AVISO: sem acesso a central; usando a copia local do instalador."
+else
+  echo "ERRO: nao consegui obter o install-leon.sh (central e copia local)." >&2; exit 1
+fi
+FUNCS="$WORK/funcoes.sh"
+awk -v names="ensure_node_runtime ensure_codex_cli codex_login_unificado provar_modelo_codex codex_cli_version node_runtime_version repair_managed_prefix_dirs validate_dedicated_node extract_pinned_node_binary verify_codex_package_archive validate_dedicated_codex_cli codex_env_limpo codex_auth_looks_valid" '
+  BEGIN{n=split(names,a," ");for(i=1;i<=n;i++)want[a[i]]=1}
+  /^[a-z_]+\(\) \{$/{f=$0;sub(/\(\).*/,"",f);cap=(f in want)}
+  cap{print}
+  cap&&/^\}$/{cap=0}
+' "$SRC" > "$FUNCS"
+bash -n "$FUNCS" || { echo "ERRO: o extrato de funcoes nao compila (a fonte mudou?)." >&2; exit 1; }
+# shellcheck disable=SC1090
+source "$FUNCS"
+declare -F ensure_node_runtime ensure_codex_cli codex_login_unificado provar_modelo_codex >/dev/null \
+  || { echo "ERRO: extracao das 4 funcoes de runtime/login falhou." >&2; exit 1; }
+say "   funcoes de runtime/login carregadas da fonte provada."
+
+# ------------------------------------------------------------
+# SEC3 · Runtime dedicado do Codex (Node 22.22.0 + Codex CLI 0.154.0 pinados).
+#   Idempotente: revalida sem rebaixar. NAO derruba o LEON claude (so instala arquivos).
+# ------------------------------------------------------------
+say ">> preparando runtime dedicado do Codex (Node $LEON_NODE_VERSION + Codex CLI $LEON_CODEX_CLI_VERSION)..."
+ensure_node_runtime  || { echo "ERRO: Node dedicado nao ficou pronto. O LEON atual segue no ar. suporte: https://wa.me/5511988890934" >&2; exit 1; }
+ensure_codex_cli     || { echo "ERRO: Codex CLI dedicado nao ficou pronto. O LEON atual segue no ar. suporte: https://wa.me/5511988890934" >&2; exit 1; }
+
+# ------------------------------------------------------------
+# SEC4 · Login do Codex + prova do modelo. codex_login_unificado e IDEMPOTENTE:
+#   se ja ha auth valido, preserva; senao device-auth (imprime URL no terminal, sem tty).
+#   Se qualquer um falhar, ABORTA aqui — o .env ainda NAO foi tocado, LEON claude intacto.
+# ------------------------------------------------------------
+mkdir -p "$LEON_CODEX_HOME" && chmod 0700 "$LEON_CODEX_HOME"
+codex_login_unificado || { echo "ERRO: login do Codex nao concluiu. O LEON atual segue no ar (nada foi trocado). suporte: https://wa.me/5511988890934" >&2; exit 1; }
+provar_modelo_codex   || { echo "ERRO: nenhum modelo respondeu nesta conta. O LEON atual segue no ar. suporte: https://wa.me/5511988890934" >&2; exit 1; }
+# a partir daqui: CODEX_MODEL = o modelo que passou; LEON_CODEX_BIN_RESOLVED = o codex dedicado.
+CODEX_BIN_ENV="${LEON_CODEX_BIN_RESOLVED:-$LEON_DATA_DIR/codex-cli/releases/$LEON_CODEX_CLI_VERSION/bin/codex}"
+if [ ! -x "$CODEX_BIN_ENV" ]; then
+  echo "ERRO: o binario Codex esperado nao existe/executavel ($CODEX_BIN_ENV). Abortando sem tocar no .env." >&2
+  exit 1
+fi
+
+# ------------------------------------------------------------
+# SEC5 · Liga o bloco Codex no .env EXISTENTE (upsert por chave; preserva o resto).
+#   (FURO-5 Astra: tmp NO MESMO diretorio do .env -> mv atomico, nlink==1, mode 600.
+#    E CODEX_MODEL tem que ficar 1x — a casa claude ja tem CODEX_MODEL=claude-...,
+#    que aqui vira o modelo Codex provado. NAO mexe em ENGINE/ENGINE_DEFAULT.)
+# ------------------------------------------------------------
+upsert_env() { # upsert_env CHAVE VALOR  (opera no arquivo $ENV_FILE, in-memory via $_ENVTXT)
+  local k="$1" v="$2"
+  if printf '%s\n' "$_ENVTXT" | grep -q "^$k="; then
+    _ENVTXT="$(printf '%s\n' "$_ENVTXT" | awk -v k="$k" -v v="$v" 'BEGIN{FS=OFS="="} $1==k{$0=k"="v} {print}')"
+  else
+    _ENVTXT="$_ENVTXT
+$k=$v"
+  fi
+}
+_ENVTXT="$(cat "$ENV_FILE")"
+upsert_env LEON_CODEX_ONLY 1
+upsert_env CODEX_APP_SERVER 1
+upsert_env CODEX_HOME "$LEON_CODEX_HOME"
+upsert_env CODEX_BIN "$CODEX_BIN_ENV"
+upsert_env CODEX_MODEL "$CODEX_MODEL"
+upsert_env CODEX_REASONING_EFFORT high
+upsert_env LEON_CODEX_CLI_VERSION "$LEON_CODEX_CLI_VERSION"
+
+TMP_ENV="$(mktemp "$(dirname "$ENV_FILE")/.env.XXXXXX")" || { echo "ERRO: mktemp do .env falhou." >&2; exit 1; }
+printf '%s\n' "$_ENVTXT" > "$TMP_ENV"
+chmod 600 "$TMP_ENV"
+# assert ANTES do mv: exatamente 1 CODEX_MODEL, ENGINE_DEFAULT preservado
+[ "$(grep -c '^CODEX_MODEL=' "$TMP_ENV")" = 1 ] || { echo "ERRO: CODEX_MODEL nao ficou unico no .env novo — abortando (nada trocado)." >&2; rm -f "$TMP_ENV"; exit 1; }
+if grep -q '^ENGINE_DEFAULT=' "$ENV_FILE"; then
+  ED="$(grep '^ENGINE_DEFAULT=' "$TMP_ENV" | head -1)"
+  [ "$ED" = "$(grep '^ENGINE_DEFAULT=' "$ENV_FILE" | head -1)" ] || { echo "ERRO: ENGINE_DEFAULT mudou — abortando." >&2; rm -f "$TMP_ENV"; exit 1; }
+fi
+cp -p "$ENV_FILE" "$ENV_FILE.bak-liga-codex" 2>/dev/null || true
+mv -f "$TMP_ENV" "$ENV_FILE"
+say "   .env: bloco Codex ligado (ENGINE_DEFAULT preservado; backup em .env.bak-liga-codex)."
+
+# ------------------------------------------------------------
+# SEC6 · config.toml do Codex. Se os bracos (pacote-base Codex) NAO existem nesta
+#   casa (ela era mono-claude), grava o config SEM [agents] — o /codex sobe igual,
+#   so sem multiagente. (FURO-4 Astra: nao buscar /download-codex, pode dar 403.)
+# ------------------------------------------------------------
+BRACOS_OK=1
+for b in braco_conteudo braco_funil braco_vendas braco_financeiro braco_advogado; do
+  [ -f "$INSTALL_DIR/.codex/agents/$b.toml" ] || BRACOS_OK=0
+done
+{
+  cat <<EOF
+model = "$CODEX_MODEL"
+model_reasoning_effort = "medium"
+preferred_auth_method = "chatgpt"
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+allow_login_shell = false
+
+[projects."$INSTALL_DIR"]
+trust_level = "untrusted"
+
+[projects."$LEON_WORK_AREA"]
+trust_level = "trusted"
+
+[features]
+multi_agent_v2 = true
+EOF
+  if [ "$BRACOS_OK" = 1 ]; then
+    cat <<EOF
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 2
+default_subagent_reasoning_effort = "low"
+
+[agents."braco_conteudo"]
+description = "Conteudo: carrossel, reel, stories, headline, calendario, post."
+config_file = "$INSTALL_DIR/.codex/agents/braco_conteudo.toml"
+nickname_candidates = ["conteudo"]
+
+[agents."braco_funil"]
+description = "Funil: carta/VSL, landing, isca, webinario, lancamento, captura."
+config_file = "$INSTALL_DIR/.codex/agents/braco_funil.toml"
+nickname_candidates = ["funil"]
+
+[agents."braco_vendas"]
+description = "Vendas: script, objecao, fechamento, prospeccao, pipeline, pos-venda."
+config_file = "$INSTALL_DIR/.codex/agents/braco_vendas.toml"
+nickname_candidates = ["vendas"]
+
+[agents."braco_financeiro"]
+description = "Financeiro: contas, saldo, conciliacao, cobranca, relatorio."
+config_file = "$INSTALL_DIR/.codex/agents/braco_financeiro.toml"
+nickname_candidates = ["financeiro"]
+
+[agents."braco_advogado"]
+description = "Juridico: contrato, clausula, risco legal, LGPD, revisao de termo."
+config_file = "$INSTALL_DIR/.codex/agents/braco_advogado.toml"
+nickname_candidates = ["advogado"]
+EOF
+  fi
+  cat <<EOF
+
+[shell_environment_policy]
+inherit = "core"
+ignore_default_excludes = false
+
+[shell_environment_policy.filters]
+"*TOKEN*" = "exclude"
+"*SECRET*" = "exclude"
+"*PASSWORD*" = "exclude"
+"*API_KEY*" = "exclude"
+"BOT_TOKEN" = "exclude"
+EOF
+} > "$LEON_CODEX_HOME/config.toml"
+chmod 600 "$LEON_CODEX_HOME/config.toml"
+if [ "$BRACOS_OK" = 1 ]; then say "   config.toml gravado (com bracos)."; else say "   config.toml gravado (sem bracos: casa nao tinha o pacote-base Codex; /codex sobe sem multiagente)."; fi
+
+# ------------------------------------------------------------
+# SEC7 · PATH do servico + restart. O app-server Codex herda o PATH do bridge; o
+#   unit atual roda o bridge no node do SISTEMA. Um drop-in poe o node dedicado na
+#   frente pro app-server usar a versao pinada. (FURO-3 Astra: daemon-reload e
+#   escrever arquivo EXIGEM root; o sudoers do leon NAO cobre. Detecto sudo -n;
+#   senao imprimo as 3 linhas pro root colar.)
+# ------------------------------------------------------------
+if [ "$LEON_LIGA_FASE" = user ]; then
+  say "   (fase user concluida; o PATH do servico e o restart ficam com a fase root, que continua agora.)"
+  exit 0
+fi
+NODE_DIR="$(dirname "${LEON_NODE_BIN_RESOLVED:-$LEON_DATA_DIR/node/releases/$LEON_NODE_VERSION/bin/node}")"
+UNIT=leon-agente.service
+DROPIN_DIR=/etc/systemd/system/$UNIT.d
+DROPIN=$DROPIN_DIR/10-codex-path.conf
+DROPIN_BODY="[Service]
+Environment=\"PATH=$NODE_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\""
+
+say ""
+if sudo -n true 2>/dev/null; then
+  say ">> aplicando PATH do runtime dedicado no servico e reiniciando..."
+  sudo mkdir -p "$DROPIN_DIR"
+  printf '%s\n' "$DROPIN_BODY" | sudo tee "$DROPIN" >/dev/null
+  sudo systemctl daemon-reload
+  sudo -n /bin/systemctl restart "$UNIT" || sudo systemctl restart "$UNIT"
+  sleep 2
+  if sudo -n /bin/systemctl is-active "$UNIT" >/dev/null 2>&1 || systemctl is-active "$UNIT" >/dev/null 2>&1; then
+    say "   ✅ Codex ligado. O servico voltou no ar."
+  else
+    say "   ⚠️ o servico nao voltou active — cole os comandos abaixo como root e cheque o journal."
+  fi
+else
+  say "════════════════════════════════════════════════════════════"
+  say "  FALTA 1 PASSO (precisa de root). Cole ISTO como root:"
+  say "════════════════════════════════════════════════════════════"
+  say "  mkdir -p $DROPIN_DIR"
+  say "  printf '%s\\n' '$DROPIN_BODY' > $DROPIN"
+  say "  systemctl daemon-reload && systemctl restart $UNIT"
+  say "════════════════════════════════════════════════════════════"
+  say "  (ate rodar isso, o Codex fica instalado mas o app-server pode usar o node do sistema.)"
+fi
+
+say ""
+say "== PRONTO. Agora no Telegram: mande /codex pra trocar pro Codex; /claude volta. =="
+say "   O motor padrao continua CLAUDE; nada da conversa foi perdido."
+exit 0
+fi
+# ===== FIM LIGA-CODEX =====
 # Projeto LEON · Socio IA 24x7 — instalador env-driven (v2)
 # Uso oficial (tudo por env var, ZERO paste travando no Browser Terminal):
 #
@@ -472,13 +840,13 @@ PY
   case "$arch" in
     x86_64|amd64)
       platform_alias=codex-linux-x64; target_triple=x86_64-unknown-linux-musl
-      platform_sha512=0b22efb8cf488fbb10b8db671ebcc7b45f83b4d21269ab9965a932872f8ca054b55f12931afdc5378fea87a73de1866d2d2b59eda5267d8433e7d5773d5e339e ;;
+      platform_sha512=6b8148dc0f2c1adc06aceaa5b6b3dbad2da16a3ac7406e7dd44c2645f891a0b31bd74571741b54196e20bba20955810d898180ee4dcfe239511c4a02654fecf5 ;;
     aarch64|arm64)
       platform_alias=codex-linux-arm64; target_triple=aarch64-unknown-linux-musl
-      platform_sha512=b9ac992a0cf9964ecfcf724f8cbf7c14640615172b6b1dec18443d0ad76ec99b1c6c87279f7898b3346f19cb9ba95c221e2dc1f68015ab2f15d8d7161b02262e ;;
+      platform_sha512=2a64c207a493e3ce3379894fa4a3ff2b93ff8116989ade938a1543fb3a2da1ee8ef6ad094813fe158bc2cf803fcd95d1ef10ce1d44534a31e9d2c0fcc164b461 ;;
     *) echo "ERRO: arquitetura sem pacote Codex homologado: $arch." >&2; return 1 ;;
   esac
-  main_sha512=4b0427b3e6085ef6975786ba45477db708133c99247d9a6e4cd1244ed224c019dfc3a7e94fad7e77a814d561d9c4aeaf58536a2420682443faf45200b283ddb8
+  main_sha512=155ff1d4e1d762ffe27e37f79978fd4e14d301671464de9c18845046147190a34e3ee226bb5596d1cf1ebf5bd4904f57187f747449d81b5b418c8931462920d3
   main_url="https://registry.npmjs.org/@openai/codex/-/codex-${LEON_CODEX_CLI_VERSION}.tgz"
   platform_url="https://registry.npmjs.org/@openai/codex/-/codex-${LEON_CODEX_CLI_VERSION}-linux-${platform_alias##*-}.tgz"
   if [ "$LEON_TEST_CODEX_CLI_ONLY" = 1 ] && [ -n "$LEON_TEST_CODEX_MAIN_SHA512" ]; then
