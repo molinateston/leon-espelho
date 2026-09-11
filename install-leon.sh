@@ -711,11 +711,11 @@ codex_login_unificado() {
 
 # Prova do modelo depois do login: a conta ChatGPT do cliente pode nao ter o
 # modelo default (o "sol"). Pede um "OK" ao modelo escolhido; se a API devolve
-# 400 "not supported", desce a escada gpt-6-astra > gpt-5.6-sol > gpt-5.5 > gpt-5.3-codex-spark e grava
+# 400 "not supported", desce a escada gpt-5.6 > gpt-5.5 > gpt-5.3-codex e grava
 # em CODEX_MODEL o primeiro que respondeu (vai pro .env e pro config.toml).
 # Nenhum respondeu = ERRO com suporte; o servico nunca sobe mudo.
 provar_modelo_codex() {
-  local candidatos="$CODEX_MODEL gpt-6-astra gpt-5.6-sol gpt-5.5 gpt-5.3-codex-spark" m vistos=" " saida ultima rc
+  local candidatos="$CODEX_MODEL gpt-5.6 gpt-5.5 gpt-5.3-codex" m vistos=" " saida ultima rc
   mkdir -p "$LEON_WORK_AREA"
   echo ">> provando acesso ao modelo (a conta precisa responder um OK)..."
   for m in $candidatos; do
@@ -723,7 +723,7 @@ provar_modelo_codex() {
     vistos="$vistos$m "
     saida=$(mktemp); ultima="$saida.ultima"
     rc=0
-    codex_env_limpo --timeout 90 exec --skip-git-repo-check --ephemeral --dangerously-bypass-approvals-and-sandbox -C "$LEON_WORK_AREA" \
+    codex_env_limpo --timeout 90 exec --skip-git-repo-check --ephemeral -C "$LEON_WORK_AREA" \
       -m "$m" -o "$ultima" "responda apenas OK" >"$saida" 2>&1 || rc=$?
     if [ "$rc" -eq 0 ] && [ -s "$ultima" ]; then
       rm -f -- "$saida" "$ultima"
@@ -731,7 +731,7 @@ provar_modelo_codex() {
       echo "   modelo $m respondeu."
       return 0
     fi
-    if grep -qiE 'not supported|"status":[[:space:]]*40[04]|status inesperado 404|n[aã]o existe|n[aã]o tem acesso|does not exist|no access|model_not_found|invalid model' "$saida"; then
+    if grep -qiE 'not supported|"status":[[:space:]]*400' "$saida"; then
       echo "   modelo $m nao esta disponivel nesta conta; tentando o proximo."
       rm -f -- "$saida" "$ultima"
       continue
@@ -780,7 +780,7 @@ ExecStart=$node_bin $install_dir/bridge.cjs
 Environment="PATH=$(dirname "$node_bin"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=100
+TimeoutStopSec=330
 KillMode=control-group
 UMask=0077
 PrivateTmp=true
@@ -1069,6 +1069,11 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
   if command -v psql >/dev/null 2>&1; then
     sudo -u postgres psql -tAc "select 1 from pg_roles where rolname='$LEON_USER'" 2>/dev/null | grep -q 1       || sudo -u postgres createuser "$LEON_USER" 2>/dev/null || true
     sudo -u postgres psql -lqt 2>/dev/null | cut -d"|" -f1 | grep -qw leon       || sudo -u postgres createdb -O "$LEON_USER" leon 2>/dev/null || true
+    # SCHEMA DO 2o CEREBRO: NAO aplicamos aqui. Aqui INSTALL_DIR ainda nao existe (nasce ~L1338) e o
+    # bundle ainda nao foi extraido, entao "$INSTALL_DIR/schema/schema-leon.sql" era 'unbound variable'
+    # sob set -u e TRAVAVA a instalacao (bug 10/09->11/09). Quem garante o schema e o proprio bridge no
+    # 1o boot (garanteSchemaBanco: existsSync do schema-leon.sql relativo ao bridge, aplica idempotente;
+    # se faltar, segue e a memoria cai no "" tolerante). Banco vazio ate la NAO derruba nada.
   fi
 
   # Node do sistema: decidido por /usr/bin/node, NUNCA por "command -v node".
@@ -1372,24 +1377,17 @@ if [ "$MOCK_MODE" != "1" ]; then
     codex_login_unificado || { echo "ERRO: login do Codex falhou. suporte: https://wa.me/5511988890934" >&2; exit 1; }
     provar_modelo_codex || exit 1
     echo ""
-  else
-    # O bridge sobe com CLAUDE_CONFIG_DIR=$LEON_DATA_DIR/claude (.env), e o motor le a
-    # credencial DE LA. Sem exportar aqui, o login gravava em $HOME/.claude e o cliente
-    # nascia mudo com o instalador dizendo "PRONTO". Login e checagem no mesmo dir.
-    export CLAUDE_CONFIG_DIR="$LEON_DATA_DIR/claude"
-    mkdir -p "$CLAUDE_CONFIG_DIR" && chmod 0700 "$CLAUDE_CONFIG_DIR"
-    if [ ! -f "$CLAUDE_CONFIG_DIR/.credentials.json" ]; then
-      echo ""
-      echo "========================================"
-      echo "  LOGIN NO CLAUDE (1 unica vez)"
-      echo "========================================"
-      echo "Vai aparecer uma URL grande. Copia, abre no navegador,"
-      echo "faz login na conta Anthropic, autoriza. Cola o codigo"
-      echo "de 6 digitos de volta aqui e enter."
-      echo ""
-      claude auth login < /dev/tty || { echo "ERRO: claude auth login falhou." >&2; exit 1; }
-      echo ""
-    fi
+  elif [ ! -d "$HOME/.claude" ] || [ ! -f "$HOME/.claude/.credentials.json" ]; then
+    echo ""
+    echo "========================================"
+    echo "  LOGIN NO CLAUDE (1 unica vez)"
+    echo "========================================"
+    echo "Vai aparecer uma URL grande. Copia, abre no navegador,"
+    echo "faz login na conta Anthropic, autoriza. Cola o codigo"
+    echo "de 6 digitos de volta aqui e enter."
+    echo ""
+    claude auth login < /dev/tty || { echo "ERRO: claude auth login falhou." >&2; exit 1; }
+    echo ""
   fi
 fi
 
@@ -1586,8 +1584,6 @@ allowed_files = {
     "lib-motores/codex-appserver.cjs",
     "lib-motores/claude.cjs",
     "lib-motores/index.cjs",
-    "lib/seletor.cjs",
-    "workers/medir-tokens.py",
     "smoke/appserver-smoke.cjs",
     "workers/piper.js",
 }
@@ -1989,6 +1985,7 @@ ENGINE_DEFAULT=$LEON_ENGINE
 TTS_PROVIDER=edgetts
 VOICE_REPLY=mirror
 VOICE_PY=$LEON_DATA_DIR/whisper-venv/bin/python3
+DRAIN_SEG=300
 EOF
 chmod 600 .env
 
@@ -2133,71 +2130,14 @@ fi
 if [ "$MOCK_MODE" != "1" ]; then
   echo ""
   echo ">> ativando licenca..."
-  # Retenta ate 3x SO em falha de rede/transiente (curl caiu, ou HTTP 5xx).
-  # Erro definitivo do servidor (machine_mismatch, email_nao_encontrado, ...) sai
-  # do loop na hora: retentar nao muda a resposta e so atrasa o cliente.
-  ATIVACAO_OK=0
-  ATIVACAO_CODE=""
-  ATIVACAO_TENTATIVAS=0
-  for ATIVACAO_TRY in 1 2 3; do
-    ATIVACAO_TENTATIVAS="$ATIVACAO_TRY"
-    RESP=$(curl -sS -m 25 -w $'\n%{http_code}' -X POST "$CENTRAL/activate" \
-      -H "Content-Type: application/json" \
-      -d "{\"email\":\"$EMAIL\",\"machine_id\":\"$MACHINE_ID\"}" 2>/dev/null || true)
-    HTTP_CODE=$(printf %s "$RESP" | tail -n1)
-    RESP=$(printf %s "$RESP" | sed '$d')
-    case "$HTTP_CODE" in
-      ''|*[!0-9]*) HTTP_CODE=0 ;;
-    esac
-    if [ "$HTTP_CODE" = "0" ]; then
-      RESP='{"ok":false,"code":"sem_conexao"}'
-    fi
-    [ -n "$RESP" ] && echo "$RESP"
-    if printf %s "$RESP" | grep -q '"ok":true'; then
-      ATIVACAO_OK=1
-      break
-    fi
-    ATIVACAO_CODE=$(printf %s "$RESP" | grep -oE '"(code|error)":"[^"]+"' | head -n1 | sed 's/.*:"//; s/"$//')
-    [ -z "$ATIVACAO_CODE" ] && ATIVACAO_CODE="sem_conexao"
-    # transiente = sem conexao ou 5xx; qualquer outra coisa e definitiva
-    if [ "$HTTP_CODE" = "0" ] || [ "$HTTP_CODE" -ge 500 ] 2>/dev/null; then
-      [ "$HTTP_CODE" = "0" ] && ATIVACAO_CODE="sem_conexao"
-      if [ "$ATIVACAO_TRY" -lt 3 ]; then
-        echo ">> ativacao nao respondeu (tentativa $ATIVACAO_TRY de 3). tentando de novo em 4s..."
-        sleep 4
-        continue
-      fi
-    fi
-    break
-  done
-
-  if [ "$ATIVACAO_OK" = "1" ]; then
-    echo "licenca ativada."
-  else
-    case "$ATIVACAO_CODE" in
-      machine_mismatch)
-        MOTIVO_HUMANO="Esta licenca ja esta ativa em OUTRA VPS. Se voce trocou de servidor, fale com o suporte pra liberar." ;;
-      email_nao_encontrado|chave_invalida)
-        MOTIVO_HUMANO="Nao achei uma licenca para o e-mail $EMAIL. Confira o e-mail da compra." ;;
-      sem_conexao)
-        MOTIVO_HUMANO="Nao consegui falar com o servidor de licencas (3 tentativas). O LEON foi instalado. Pra tentar ativar de novo, mande /reparar pro seu bot no Telegram. Se seguir sem funcionar, fale com o suporte." ;;
-      *)
-        MOTIVO_HUMANO="Ativacao falhou: $ATIVACAO_CODE. Fale com o suporte." ;;
-    esac
-    echo ""
-    echo "========================================"
-    echo "  ATENCAO: A LICENCA NAO FOI ATIVADA"
-    echo "========================================"
-    echo "O LEON foi instalado e vai subir normalmente."
-    echo ""
-    echo "$MOTIVO_HUMANO"
-    echo ""
+  RESP=$(curl -fsS -X POST "$CENTRAL/activate" \
+    -H "Content-Type: application/json" \
+    -d "{\"email\":\"$EMAIL\",\"machine_id\":\"$MACHINE_ID\"}" || echo '{"ok":false,"code":"sem_conexao"}')
+  echo "$RESP"
+  if ! printf %s "$RESP" | grep -q '"ok":true'; then
+    echo "ATENCAO: ativacao no central falhou. motor instalado mas nao ativou."
+    echo "se for machine_mismatch: essa chave ja foi ativada em outra VPS."
     echo "suporte: https://wa.me/5511988890934"
-    echo "========================================"
-    echo ""
-    mkdir -p "$LEON_DATA_DIR" 2>/dev/null || true
-    echo "$(date '+%Y-%m-%dT%H:%M:%S%z') ativacao_pendente code=$ATIVACAO_CODE http=$HTTP_CODE tentativas=$ATIVACAO_TENTATIVAS email=$EMAIL" \
-      > "$LEON_DATA_DIR/ativacao-pendente.txt" 2>/dev/null || true
   fi
 fi
 

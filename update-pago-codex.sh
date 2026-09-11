@@ -1225,7 +1225,11 @@ allowed={
  "DEBOUNCE_MS","DEBOUNCE_MAX","MAX_CONCURRENT","TETO_ADAPTATIVO","MAX_FILE_MB","MISSAO_CAP_MIN",
  "MISSAO_STALL_MIN","MISSAO_MAX_RETRIES","MISSAO_RETAIN_DAYS",
  "MISSAO_GATE_MIN","TMP_RETENTION_MS","MEMVIVA_READ_MAX",
- "MEMVIVA_ROTATE_AT","ASSUNTOS_READ_MAX","HEARTBEAT_SEG","AVISO_PESADA_SEG","DRAIN_SEG","TZ",
+ "MEMVIVA_ROTATE_AT","ASSUNTOS_READ_MAX","HEARTBEAT_SEG","AVISO_PESADA_SEG","TZ",
+ # DRAIN_SEG saiu da allowlist de user-env e virou chave GERENCIADA (11/09, cura dos 74
+ # "adapter closed"): o updater re-grava DRAIN_SEG=300 no bloco comum abaixo, garantindo que
+ # TODA casa (inclusive as ja vivas, que nunca tiveram a chave) drene ate 300s no restart do
+ # /atualiza em vez dos 75s que matavam turno de missao longa no meio.
 }
 selected=[]; seen=set()
 for line in open(source,encoding="utf-8").read().splitlines():
@@ -1291,6 +1295,7 @@ MEMVIVA_FILE=$LEON_DATA_DIR/brain/MEMORIA-VIVA.md
 ASSUNTOS_FILE=$LEON_DATA_DIR/brain/ASSUNTOS-VIVOS.md
 TTS_PROVIDER=edgetts
 VOICE_REPLY=mirror
+DRAIN_SEG=300
 EOF
   # As chaves do CLI de cada motor entram so na casa que usa aquele CLI. Escrever as do
   # Codex numa casa do outro motor apontaria pra um binario que nao existe ali.
