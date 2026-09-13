@@ -2521,6 +2521,32 @@ if [ "$MOCK_MODE" != "1" ]; then
     echo "ATENCAO: ativacao no central falhou. motor instalado mas nao ativou."
     echo "se for machine_mismatch: essa chave ja foi ativada em outra VPS."
     echo "suporte: https://wa.me/5511988890934"
+  else
+    # A chave da licenca vem NA RESPOSTA do /activate (campo "key"). Ate a 2.4.48 ela
+    # era descartada e o .env saia sem LEON_LICENSE_KEY, entao o gate KEY_PRESENT do
+    # bridge nunca ligava. Gravamos aqui, depois do ok. O cliente nao digita nada a
+    # mais: a chave e a que a central ja tem no cadastro do email dele.
+    LICENSE_KEY=$(printf %s "$RESP" | python3 -c '
+import json, re, sys
+try:
+    key = str(json.load(sys.stdin).get("key") or "").strip()
+except Exception:
+    key = ""
+print(key if re.fullmatch(r"[A-Za-z0-9_-]{8,128}", key) else "")
+')
+    if [ -n "$LICENSE_KEY" ]; then
+      if grep -q "^LEON_LICENSE_KEY=" .env 2>/dev/null; then
+        grep -v "^LEON_LICENSE_KEY=" .env > .env.key-new && mv -f .env.key-new .env
+      fi
+      printf 'LEON_LICENSE_KEY=%s\n' "$LICENSE_KEY" >> .env
+      chmod 600 .env
+      echo ">> licenca ativa e chave gravada no .env."
+    else
+      echo "ATENCAO: a central ativou mas nao devolveu a chave da licenca."
+      echo "O agente sobe e funciona, porem sem LEON_LICENSE_KEY no .env o controle de"
+      echo "licenca do proprio agente fica desligado (so o email identifica esta casa)."
+      echo "Peca a chave no suporte e acrescente a linha LEON_LICENSE_KEY=<chave> no .env."
+    fi
   fi
 fi
 

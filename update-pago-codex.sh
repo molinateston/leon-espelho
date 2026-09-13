@@ -438,7 +438,8 @@ print("version="+version); print("updater_sha256="+item["sha256"]); print("updat
 PY
 }
 if [ "$FINALIZE_MODE" -eq 0 ] && [ -z "${LEON_UPDATE_BLINDADO:-}" ] \
-   && [ "${LEON_TEST_RELEASE_HELPERS_ONLY:-0}" != "1" ]; then
+   && [ "${LEON_TEST_RELEASE_HELPERS_ONLY:-0}" != "1" ] \
+   && [ "${LEON_TEST_SKILLS_HELPERS_ONLY:-0}" != "1" ]; then
   S0_CHAT="${1:-}"; S0_THREAD="${2:-}"
   S0_MAN=""; S0_SIG=""; S0_PUB=""; S0_META=""; S0_CAND=""
   s0_log() { printf '%s [stage0] %s\n' "$(date '+%F %T')" "$*" >> "$INSTALL_DIR/upgrade.log" 2>/dev/null || true; }
@@ -1218,7 +1219,7 @@ import os,re,sys
 source,destination=sys.argv[1:]
 allowed={
  "TELEGRAM_BOT_TOKEN","OWNER_CHAT_ID","GROUP_CHAT_ID","ALLOWED_SENDERS",
- "LEON_LICENSE_EMAIL","LEON_LICENSE_CENTRAL","LEON_MACHINE_ID","AGENT_NAME","AGENT_GENDER",
+ "LEON_LICENSE_EMAIL","LEON_LICENSE_KEY","LEON_LICENSE_CENTRAL","LEON_MACHINE_ID","AGENT_NAME","AGENT_GENDER",
  "EDGE_TTS_VOICE","TTS_VOICE","TTS_MODEL",
  "ELEVENLABS_API_KEY","ELEVENLABS_VOICE_ID","ELEVENLABS_MODEL_ID","ELEVENLABS_STABILITY",
  "ELEVENLABS_SIMILARITY","ELEVENLABS_STYLE","HOSTINGER_API_TOKEN","HOSTINGER_VM_ID",
@@ -1277,6 +1278,7 @@ LEON_DATA_DIR=$LEON_DATA_DIR
 BRAIN_DIR=$LEON_DATA_DIR/brain
 PERSONA_DIR=$LEON_DATA_DIR/persona
 LEON_SKILLS_DIR=$LEON_SKILLS_DIR
+LEON_SKILLS_PESSOAIS_DIR=$(skills_personal_dir)
 LEON_TMPDIR=$LEON_TMPDIR
 LEON_WORK_AREA=$LEON_WORK_AREA
 LEON_STATE_DIR=$LEON_STATE_DIR
@@ -1603,6 +1605,41 @@ restore_skills_from_tx() {
   fi
 }
 
+# 0.7 (obra Fase 0) SEPARACAO catalogo do produto x skills do dono.
+#
+#   <LEON_SKILLS_DIR>              catalogo do PRODUTO. Trocado inteiro por rename a
+#                                  cada release, como sempre foi. Nada do dono mora aqui.
+#   <LEON_DATA_DIR>/skills-pessoais/  skills do DONO. O updater NUNCA toca: nao renomeia,
+#                                  nao apaga, nao valida contra o manifesto assinado.
+#
+# Antes da separacao o unico catalogo era o do produto, e o rename da release levava junto
+# qualquer skill que o dono tivesse posto la. A pasta pessoal e criada (vazia) no proprio
+# update, entao a casa que atualiza uma vez ja passa a ter o lugar certo pra guardar.
+skills_personal_dir() {
+  printf '%s\n' "${LEON_SKILLS_PESSOAIS_DIR:-${LEON_DATA_DIR:-$HOME/.leon}/skills-pessoais}"
+}
+
+# Cria a pasta pessoal se ainda nao existir, com as mesmas guardas do resto do updater:
+# tem que ficar dentro da HOME, ser diretorio real (nao link) e pertencer a quem roda.
+ensure_skills_personal_dir() {
+  local dir; dir="$(skills_personal_dir)"
+  case "$dir" in "$HOME"/*) ;; *) return 1 ;; esac
+  if [ -e "$dir" ]; then
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+    return 0
+  fi
+  mkdir -m 0700 -p -- "$dir" 2>/dev/null || return 1
+  return 0
+}
+
+# Prontidao: a casa so dispensa a quarentena do catalogo quando a pasta pessoal existe
+# como diretorio real dentro da home. Enquanto nao existir, o backup fica.
+skills_personal_dir_ready() {
+  local dir; dir="$(skills_personal_dir)"
+  case "$dir" in "$HOME"/*) ;; *) return 1 ;; esac
+  [ -d "$dir" ] && [ ! -L "$dir" ]
+}
+
 remove_committed_skills_backup() {
   local skills="$1" backup="$2"
   [ -z "$backup" ] && return 0
@@ -1645,6 +1682,38 @@ except Exception:
     raise SystemExit(1)
 PY
 }
+
+# ENSAIO DAS SKILLS (0.7, obra Fase 0). Mesmo padrao do LEON_TEST_RELEASE_HELPERS_ONLY
+# acima: expoe as funcoes REAIS de skills pra prova de bancada, sem rede, sem systemd e
+# sem release assinada. O teste chama a mesma funcao que o /atualiza chama; nao existe
+# copia do comportamento no teste. Fora deste modo o bloco nao roda.
+if [ "${LEON_TEST_SKILLS_HELPERS_ONLY:-0}" = "1" ]; then
+  case "${1:-}" in
+    personal-dir)       skills_personal_dir ;;
+    personal-ensure)    ensure_skills_personal_dir ;;
+    personal-ready)     skills_personal_dir_ready ;;
+    backup-remove)      remove_committed_skills_backup "$2" "$3" ;;
+    # troca do catalogo do produto: exatamente os dois renames do corpo (:2827).
+    catalog-swap)
+      _cs_dir="$2"; _cs_stage="$3"; _cs_backup="$4"
+      if [ -e "$_cs_dir" ]; then
+        { [ -d "$_cs_dir" ] && [ ! -L "$_cs_dir" ]; } || exit 1
+        mv -- "$_cs_dir" "$_cs_backup" || exit 1
+      fi
+      mv -- "$_cs_stage" "$_cs_dir" || exit 1
+      ;;
+    # rollback do catalogo: o mesmo movimento do restore_skills_from_tx (:1580).
+    catalog-rollback)
+      _cr_dir="$2"; _cr_backup="$3"; _cr_failed="$4"
+      [ -d "$_cr_backup" ] && [ ! -L "$_cr_backup" ] || exit 1
+      if [ -e "$_cr_dir" ]; then mv -- "$_cr_dir" "$_cr_failed" || exit 1; fi
+      mv -- "$_cr_backup" "$_cr_dir" || exit 1
+      ;;
+    env-filter)         filter_user_env "$2" "$3" ;;
+    *) exit 64 ;;
+  esac
+  exit $?
+fi
 
 rollback_transaction() {
   local tx="$1" live backup failed marker thread chat
@@ -1925,11 +1994,22 @@ finalize_transaction() {
     # backup é limpeza de quarentena; nunca tentamos rollback depois de apagá-lo.
     skills_backup="$(tx_read "$tx" skills-backup-path 2>/dev/null || true)"
     skills_path="$(tx_read "$tx" skills-path 2>/dev/null || true)"
-    remove_committed_skills_backup "$skills_path" "$skills_backup" || {
-      rmdir -- "$lock_dir" 2>/dev/null || true
-      trap - RETURN
-      return 1
-    }
+    # 0.7 (obra Fase 0): o backup do catalogo NAO e apagado no sucesso enquanto a casa
+    # nao tiver a pasta de skills pessoais. Ate a 2.4.48 o catalogo era o unico lugar
+    # onde uma skill do proprio dono podia morar, e apagar a quarentena logo apos o
+    # smoke tirava a ultima copia dela. Com <LEON_DATA_DIR>/skills-pessoais/ no ar a
+    # separacao ja protege o que e do dono, e a limpeza volta a ser segura.
+    if skills_personal_dir_ready; then
+      remove_committed_skills_backup "$skills_path" "$skills_backup" || {
+        rmdir -- "$lock_dir" 2>/dev/null || true
+        trap - RETURN
+        return 1
+      }
+    else
+      printf '%s\n' "$skills_backup" >> "${LEON_DATA_DIR:-$HOME/.leon}/.skills-backups-retidos" 2>/dev/null || true
+      printf '%s [skills] catalogo anterior mantido em quarentena (%s): casa ainda sem skills-pessoais.\n' \
+        "$(date '+%F %T')" "$skills_backup" >> "$live/upgrade.log" 2>/dev/null || true
+    fi
     printf 'succeeded\n' > "$tx/status"
     remove_finalize_cron "$marker"
     rm -f -- "$live/.update-pending.json" 2>/dev/null || true
@@ -2186,6 +2266,9 @@ fi
 
 mkdir -p -- "$TX_ROOT" "$CODEX_HOME_DIR" "$LEON_TMPDIR" "$LEON_WORK_AREA" \
   "$LEON_DATA_DIR/brain" "$LEON_DATA_DIR/persona" "$LEON_MISSIONS_DIR" "$LEON_PROMISES_DIR" "$LEON_MISSION_OUTPUT_DIR"
+# 0.7: a casa do dono ganha o lugar dele. Fora da transacao de proposito: a pasta
+# pessoal nao entra em rollback, porque o updater nunca a modifica.
+ensure_skills_personal_dir || fatal "nao consegui preparar a pasta de skills pessoais."
 chmod 0700 "$LEON_DATA_DIR" "$TX_ROOT" "$CODEX_HOME_DIR" 2>/dev/null || true
 validate_runtime_roots 1 || fatal "os caminhos de dados mudaram durante a preparação; runtime preservado."
 [ ! -e "$SKILLS_STAGE" ] && [ ! -e "$SKILLS_BACKUP" ] && [ ! -e "$SKILLS_FAILED" ] \
