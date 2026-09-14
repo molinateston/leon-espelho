@@ -1,40 +1,40 @@
 {
- "artifacts": {
-  "base": {
-   "bytes": 89874,
-   "file": "leon-base-curated.tar.gz",
-   "licensed": true,
-   "sha256": "e2ef14fd99c37bebf3d7b96604f0bffe462d0c1f9f2f68a66d377e08e9b1042c",
-   "url": "/download-codex"
+  "artifacts": {
+    "base": {
+      "bytes": 89874,
+      "file": "leon-base-curated.tar.gz",
+      "licensed": true,
+      "sha256": "e2ef14fd99c37bebf3d7b96604f0bffe462d0c1f9f2f68a66d377e08e9b1042c",
+      "url": "/download-codex"
+    },
+    "bundle": {
+      "bytes": 527963,
+      "file": "leon-codex-appserver-v2.tar.gz",
+      "licensed": false,
+      "sha256": "9af3d7bdeb975b3047d760a7d317e6c13f66ab68e6550953e4af62b712a9860f",
+      "url": "/leon-codex-appserver-v2.tar.gz"
+    },
+    "skills": {
+      "bytes": 15695590,
+      "file": "leon-skills-codex-minimal.tar.gz",
+      "licensed": false,
+      "sha256": "099c9a73907365507d422e352be6dadf1de1f1ae023105c3ffcd3847f5908aa9",
+      "url": "/leon-skills-codex-minimal.tar.gz"
+    },
+    "updater": {
+      "bytes": 157118,
+      "file": "update-pago-codex.sh",
+      "licensed": false,
+      "sha256": "741e623f381ec3302ca3b5c6f59584f24de6b63c54d7abd63f7b3d45b3908e45",
+      "url": "/update-pago-codex.sh"
+    }
   },
-  "bundle": {
-   "bytes": 523276,
-   "file": "leon-codex-appserver-v2.tar.gz",
-   "licensed": false,
-   "sha256": "dcad8bdb8b138a7856eff6d64cfd809872c485ab85d41c4707be0f865e7d6402",
-   "url": "/leon-codex-appserver-v2.tar.gz"
-  },
-  "skills": {
-   "bytes": 15695590,
-   "file": "leon-skills-codex-minimal.tar.gz",
-   "licensed": false,
-   "sha256": "099c9a73907365507d422e352be6dadf1de1f1ae023105c3ffcd3847f5908aa9",
-   "url": "/leon-skills-codex-minimal.tar.gz"
-  },
-  "updater": {
-   "bytes": 157118,
-   "file": "update-pago-codex.sh",
-   "licensed": false,
-   "sha256": "741e623f381ec3302ca3b5c6f59584f24de6b63c54d7abd63f7b3d45b3908e45",
-   "url": "/update-pago-codex.sh"
-  }
- },
- "channel": "stable",
- "codexCliVersion": "0.154.0",
- "keyFingerprint": "eb70521f5e4dd9bb1cd11e6ceb0b2bddd65596558322908a2d04fd3dec5cbe08",
- "kind": "leon-codex-release",
- "minVersion": "2.0.0",
- "nodeVersion": "22.22.0",
- "schema": 2,
- "version": "2.5.2"
+  "channel": "stable",
+  "codexCliVersion": "0.154.0",
+  "keyFingerprint": "eb70521f5e4dd9bb1cd11e6ceb0b2bddd65596558322908a2d04fd3dec5cbe08",
+  "kind": "leon-codex-release",
+  "minVersion": "2.0.0",
+  "nodeVersion": "22.22.0",
+  "schema": 2,
+  "version": "2.5.4"
 }
