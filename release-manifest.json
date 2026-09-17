@@ -22,10 +22,10 @@
       "url": "/leon-skills-codex-minimal.tar.gz"
     },
     "updater": {
-      "bytes": 157118,
+      "bytes": 163217,
       "file": "update-pago-codex.sh",
       "licensed": false,
-      "sha256": "741e623f381ec3302ca3b5c6f59584f24de6b63c54d7abd63f7b3d45b3908e45",
+      "sha256": "9e87cfe609cf3ef7b0a63adbb14bcd97feff29008c444b6a422724681b0bdf85",
       "url": "/update-pago-codex.sh"
     }
   },
@@ -36,5 +36,5 @@
   "minVersion": "2.0.0",
   "nodeVersion": "22.22.0",
   "schema": 2,
-  "version": "2.6.1"
+  "version": "2.6.2"
 }

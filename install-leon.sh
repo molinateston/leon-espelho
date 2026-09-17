@@ -1909,6 +1909,12 @@ PY
     exit 1
   fi
   cp -a "$INNER"/. "$INSTALL_DIR"/
+  # 17/09: "cp -a INNER/." carrega o MODO do diretorio de origem pro destino, e INNER
+  # sai do tar --no-same-permissions sob o umask de login (022) de um tarball cuja raiz
+  # e 755. Medido na bancada: a casa do cliente passava de 700 pra 755 na reinstalacao,
+  # ou seja, legivel por qualquer outro usuario da VPS. So o diretorio de cima, nunca -R:
+  # os scripts continuam +x logo abaixo e os .leon/* ja recebem 700 no passo do .env.
+  chmod 700 "$INSTALL_DIR"
   normalizar_agent_base "$INSTALL_DIR/AGENT-BASE.md"
   # NUCLEO UNICO (23/08): a alma do agente e a MESMA nos dois motores; o que muda e o
   # bloco _MOTOR-<motor>. As pecas vem PRONTAS no pacote (o cliente nao gera doutrina) e
@@ -2007,6 +2013,11 @@ PY
   BUNDLE_EXTRACT=$(mktemp -d)
   tar --no-same-owner --no-same-permissions -xzf "$BUNDLE_TMP" -C "$BUNDLE_EXTRACT"
   cp -a "$BUNDLE_EXTRACT"/. "$INSTALL_DIR"/
+  # 17/09 (medido na bancada): este e o TERCEIRO cp -a para a casa e era o unico sem chmod.
+  # O tarball do bundle traz um membro "./", entao o tar sobe o diretorio de extracao para 755
+  # e o cp -a carrega esse 755 para a casa, que nasceu 700. Numa VPS com mais de um usuario a
+  # casa do cliente ficava legivel por qualquer um depois de reinstalar.
+  chmod 700 "$INSTALL_DIR"
   chmod 0700 "$INSTALL_DIR/bridge.cjs" "$INSTALL_DIR/smoke/appserver-smoke.cjs" "$INSTALL_DIR/workers/piper.js" 2>/dev/null || true
   chmod 0600 "$INSTALL_DIR/capabilities.json" 2>/dev/null || true
   chmod 0600 "$INSTALL_DIR/appserver"/*.cjs "$INSTALL_DIR/appserver/package.json" "$INSTALL_DIR/lib"/*.js "$INSTALL_DIR/lib-motores"/*.cjs 2>/dev/null || true
@@ -2136,6 +2147,9 @@ PY
       exit 1
     fi
     cp -a "$INNER"/. "$INSTALL_DIR"/
+    # 17/09: mesmo motivo do outro cp -a, o modo 755 do diretorio raiz do tarball
+    # vazava pra casa do cliente. So o diretorio de cima, nunca -R.
+    chmod 700 "$INSTALL_DIR"
     rm -rf "$STAGE" "$TARBALL"
   fi
   # Atualizador e redes de seguranca precisam ser executaveis (o cron chama direto).
@@ -2234,10 +2248,40 @@ PY
         && echo "   habilidades atualizadas." \
         || echo "   (aviso) ja existiam habilidades aqui, mantive como estao."
     else
-      if GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$SKILLS_SSH" git clone -q git@github.com:molinateston/soft.git "$SKILLS_DIR" 2>/tmp/skills-clone.err; then
-        echo "   habilidades instaladas ($(find "$SKILLS_DIR" -maxdepth 1 -mindepth 1 -type d ! -name '.git' | wc -l) no total)."
+      # MENSAGEM MENTIROSA (medido 17/09): quando o clone falhava, o instalador dizia
+      # "sem rede?" e mandava o dono olhar a internet. O erro real capturado em
+      # /tmp/skills-clone.err era "destination path already exists and is not an empty
+      # directory". Agora a condicao de pasta cheia e testada ANTES, e o que sobra do
+      # git e classificado pela primeira linha do erro, sem chutar a causa.
+      SKILLS_N_ITENS=0
+      [ -d "$SKILLS_DIR" ] && SKILLS_N_ITENS="$(find "$SKILLS_DIR" -maxdepth 1 -mindepth 1 2>/dev/null | wc -l | tr -d ' ')"
+      if [ -d "$SKILLS_DIR" ] && [ "$SKILLS_N_ITENS" -gt 0 ]; then
+        echo "   (aviso) ja existe uma pasta de habilidades aqui sem controle de versao ($SKILLS_N_ITENS itens);"
+        echo "   mantive como esta e nao baixei por cima."
       else
-        echo "   (aviso) nao consegui baixar as habilidades agora (sem rede?). O proximo /atualiza tenta de novo."
+        # Erro do git fora do /tmp compartilhado (nome fixo la era arquivo de todo
+        # mundo). Sai num temp da propria casa, apagado assim que a linha e lida.
+        mkdir -p "$LEON_TMPDIR" 2>/dev/null || true
+        SKILLS_ERR="$(mktemp "$LEON_TMPDIR/skills-clone.XXXXXX" 2>/dev/null || mktemp)"
+        if GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$SKILLS_SSH" git clone -q git@github.com:molinateston/soft.git "$SKILLS_DIR" 2>"$SKILLS_ERR"; then
+          echo "   habilidades instaladas ($(find "$SKILLS_DIR" -maxdepth 1 -mindepth 1 -type d ! -name '.git' | wc -l) no total)."
+        else
+          SKILLS_LINHA="$(sed -n '1p' "$SKILLS_ERR" 2>/dev/null | tr -d '\r' | cut -c1-160)"
+          case "$SKILLS_LINHA" in
+            *"Could not resolve host"*|*"Connection timed out"*|*"Network is unreachable"*|*"connect to host"*)
+              echo "   (aviso) sem rede ate o GitHub, nao baixei as habilidades. O proximo /atualiza tenta de novo." ;;
+            *"Permission denied (publickey)"*|*"Host key verification failed"*)
+              echo "   (aviso) o GitHub nao aceitou a chave SSH desta casa, nao baixei as habilidades."
+              echo "   O proximo /atualiza tenta de novo." ;;
+            *"already exists and is not an empty directory"*)
+              echo "   (aviso) a pasta ja existe e nao esta vazia; nao baixei as habilidades por cima." ;;
+            "")
+              echo "   (aviso) o git nao baixou as habilidades e nao disse por que." ;;
+            *)
+              echo "   (aviso) o git nao baixou as habilidades: $SKILLS_LINHA" ;;
+          esac
+        fi
+        rm -f -- "$SKILLS_ERR"
       fi
     fi
   fi
@@ -2359,9 +2403,24 @@ print("%s|%s" % (chat_id, last_id if last_id >= 0 else ""))
 fi
 
 # ------------------------------------------------------------
-# 2.5 .env do cliente
+# 2.5 .env do cliente (escrita que PRESERVA o que e do cliente)
 # ------------------------------------------------------------
-cat > .env <<EOF
+# CAUSA MEDIDA 17/09: este passo era "cat > .env", e o sinal de maior TRUNCA o
+# arquivo. Nada no instalador inteiro relia o .env anterior, entao toda
+# reinstalacao apagava CALADA as chaves que o instalador nao conhece: na bancada,
+# das 10 chaves de integracao semeadas, 10 sumiram (o .env caiu de 47 para 35
+# linhas) e nenhuma mensagem avisou o dono.
+# A regra agora: o instalador reescreve SO as chaves que ele mesmo escreve (as 40
+# dos quatro blocos abaixo) e devolve TODA outra linha do .env antigo verbatim e
+# na ordem antiga. Nao e lista branca: o conjunto preservado e o COMPLEMENTO do
+# que o instalador escreve, derivado dos proprios blocos. A unica pergunta "o
+# bridge aceita esta chave?" e feita ao lib/integracoes.cjs do runtime que acabou
+# de ser desempacotado, nunca a uma lista dentro do instalador; o que o bridge
+# recusa nao e apagado, vira linha de quarentena "#LEON-GUARDADO" na MESMA
+# posicao do arquivo (o bridge pula comentario, entao a casa sobe).
+
+_env_bloco_a() {
+cat <<EOF
 TELEGRAM_BOT_TOKEN=$BOT_TOKEN
 OWNER_CHAT_ID=$OWNER_CHAT_ID
 LEON_LICENSE_EMAIL=$EMAIL
@@ -2376,15 +2435,15 @@ VOICE_REPLY=mirror
 VOICE_PY=$LEON_DATA_DIR/whisper-venv/bin/python3
 DRAIN_SEG=300
 EOF
-chmod 600 .env
+}
 
 # RAMO C: as chaves de CAMINHO valem pros DOIS motores. O agente e o mesmo em
 # qualquer motor, e ele le brain, persona, skills, area de trabalho e saida de
 # missao pelos mesmos caminhos. Enquanto este bloco era so do Codex, uma casa no
 # outro motor subia sem BRAIN_DIR e sem PERSONA_DIR, ou seja, sem a memoria e sem a
 # persona do dono, e ninguem avisava.
-if [ "$LEON_ENGINE" = codex ] || [ "$LEON_ENGINE" = claude ]; then
-  cat >> .env <<EOF
+_env_bloco_b() {
+cat <<EOF
 LEON_DATA_DIR=$LEON_DATA_DIR
 BRAIN_DIR=$LEON_DATA_DIR/brain
 PERSONA_DIR=$LEON_DATA_DIR/persona
@@ -2405,33 +2464,24 @@ PIPER_MODEL=$LEON_DATA_DIR/voices/piper/pt_BR-faber-medium.onnx
 MEMVIVA_FILE=$LEON_DATA_DIR/brain/MEMORIA-VIVA.md
 ASSUNTOS_FILE=$LEON_DATA_DIR/brain/ASSUNTOS-VIVOS.md
 EOF
-  chmod 600 .env
-  mkdir -p "$LEON_TMPDIR" "$LEON_DATA_DIR/brain" \
-    "$LEON_DATA_DIR/persona" "$LEON_WORK_AREA" "$LEON_STATE_DIR" "$LEON_MISSIONS_DIR" \
-    "$LEON_PROMISES_DIR" "$LEON_MISSION_OUTPUT_DIR"
-  chmod 700 "$LEON_DATA_DIR" "$LEON_TMPDIR" "$LEON_STATE_DIR" "$LEON_MISSION_OUTPUT_DIR"
-fi
+}
 
 # Chaves do segundo motor: a casa dele (onde moram transcript de sessao e o arquivo do
 # dossie) e o modelo padrao. O CLI do fabricante ja foi instalado la em cima; aqui so
 # apontamos onde ele guarda estado, fora do HOME do usuario que roda o servico.
-if [ "$LEON_ENGINE" = claude ]; then
-  cat >> .env <<EOF
+_env_bloco_c() {
+cat <<EOF
 CLAUDE_CONFIG_DIR=$LEON_DATA_DIR/claude
 CODEX_MODEL=$LEON_CLAUDE_MODEL
 CODEX_REASONING_EFFORT=high
 EOF
-  chmod 600 .env
-  mkdir -p "$LEON_DATA_DIR/claude"
-  chmod 700 "$LEON_DATA_DIR/claude"
-fi
+}
 
 # Daqui pra baixo e so do motor Codex: o binario PINADO (unico caminho que o bridge
 # aceita), a versao cravada do CLI, o modelo que respondeu na prova (A8) e o
 # config.toml do proprio Codex. O outro motor nao tem nada disso.
-if [ "$LEON_ENGINE" = codex ]; then
-  CODEX_BIN_ENV="${LEON_CODEX_BIN_RESOLVED:-$LEON_DATA_DIR/codex-cli/releases/$LEON_CODEX_CLI_VERSION/bin/codex}"
-  cat >> .env <<EOF
+_env_bloco_d() {
+cat <<EOF
 LEON_CODEX_ONLY=1
 CODEX_APP_SERVER=1
 CODEX_HOME=$LEON_CODEX_HOME
@@ -2440,9 +2490,309 @@ CODEX_MODEL=$CODEX_MODEL
 CODEX_REASONING_EFFORT=high
 LEON_CODEX_CLI_VERSION=$LEON_CODEX_CLI_VERSION
 EOF
-  chmod 600 .env
+}
+
+# Os nomes GERENCIADOS saem dos QUATRO blocos, SEMPRE, independente do motor
+# escolhido, e so os NOMES viajam (o sed corta o valor). Chave que ESTE motor nao
+# escreve tambem nao pode sobrar do motor anterior: reinstalar como claude por
+# cima de casa codex deixaria LEON_CODEX_ONLY=1 vivo com ENGINE=claude.
+# Derivado dos proprios blocos, nao de um rol de nomes: chave nova num bloco entra
+# no conjunto sozinha, sem ninguem lembrar de atualizar lista.
+_env_nomes_gerenciadas() {
+  ( set +u; _env_bloco_a; _env_bloco_b; _env_bloco_c; _env_bloco_d ) 2>/dev/null \
+    | sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' | sort -u
+}
+
+# escreve_env_preservando BLOCO_NOVO NOMES_GERENCIADOS [topo|fim]
+escreve_env_preservando() {
+  local BLOCO="$1" GERIDAS="$2" POS="${3:-topo}"
+  local ENVF="$INSTALL_DIR/.env"
+  local OBRA TMP_NOVO BKP CARIMBO INFO TIPO NLINK TAM DONO MEU NODEBIN
+  _ENV_BACKUP=""
+
+  OBRA="$(mktemp -d "$INSTALL_DIR/.env-obra.XXXXXX")" \
+    || { echo "ERRO: nao consegui criar area temporaria dentro de $INSTALL_DIR." >&2; exit 1; }
+  trap 'rm -rf -- "$OBRA"' RETURN
+
+  printf '%s' "$BLOCO" > "$OBRA/bloco"
+  : > "$OBRA/cauda"
+
+  if [ -e "$ENVF" ] || [ -L "$ENVF" ]; then
+    # MESMAS checagens de ARQUIVO que o bridge faz antes de ler o .env
+    # (bridge.cjs 96-98). Symlink, nlink>1, dono diferente ou arquivo acima de
+    # 256 KiB nao e estado de casa viva: alguem precisa olhar. Aborta sem
+    # escrever nem renomear nada (o trap de EXIT religa o LEON antigo).
+    # Corrupcao de CONTEUDO nao aborta: vai pra quarentena mais abaixo.
+    INFO="$(stat -c '%F|%h|%s|%u' -- "$ENVF" 2>/dev/null || echo '')"
+    TIPO="${INFO%%|*}"; INFO="${INFO#*|}"
+    NLINK="${INFO%%|*}"; INFO="${INFO#*|}"
+    TAM="${INFO%%|*}"; DONO="${INFO##*|}"
+    MEU="$(id -u)"
+    if [ "$TIPO" != "regular file" ] && [ "$TIPO" != "regular empty file" ]; then
+      echo "ERRO: $ENVF nao e arquivo comum (e '$TIPO'). O bridge tambem recusa isso." >&2
+      echo "Nada foi escrito e nada foi renomeado. Olhe esse caminho e rode o instalador de novo." >&2
+      rm -rf -- "$OBRA"; exit 1
+    fi
+    if [ "${NLINK:-1}" != "1" ]; then
+      echo "ERRO: $ENVF tem mais de um nome no disco (hard link, nlink=$NLINK)." >&2
+      echo "Nada foi escrito e nada foi renomeado. Olhe esse caminho e rode o instalador de novo." >&2
+      rm -rf -- "$OBRA"; exit 1
+    fi
+    if [ "${TAM:-0}" -gt 262144 ]; then
+      echo "ERRO: $ENVF tem $TAM bytes e o limite que o bridge le e 256 KiB." >&2
+      echo "Nada foi escrito e nada foi renomeado. Olhe esse caminho e rode o instalador de novo." >&2
+      rm -rf -- "$OBRA"; exit 1
+    fi
+    if [ "${DONO:-$MEU}" != "$MEU" ]; then
+      echo "ERRO: $ENVF pertence ao uid $DONO e esta fase roda como uid $MEU." >&2
+      echo "Nada foi escrito e nada foi renomeado. Olhe esse caminho e rode o instalador de novo." >&2
+      rm -rf -- "$OBRA"; exit 1
+    fi
+
+    # Copia de seguranca do .env que estava no disco, pelo mesmo mktemp+mv (600).
+    # O bridge so le o nome ".env", entao a copia e inerte. Guarda as 3 ultimas.
+    CARIMBO="$(date -u +%Y%m%dT%H%M%SZ)"
+    BKP="$(mktemp "$INSTALL_DIR/.env.bkp.XXXXXX")" \
+      || { echo "ERRO: nao consegui criar a copia de seguranca do .env." >&2; rm -rf -- "$OBRA"; exit 1; }
+    cat -- "$ENVF" > "$BKP" \
+      || { rm -f -- "$BKP"; echo "ERRO: nao consegui ler $ENVF." >&2; rm -rf -- "$OBRA"; exit 1; }
+    chmod 600 "$BKP"
+    mv -f -- "$BKP" "$INSTALL_DIR/.env.anterior-$CARIMBO"
+    _ENV_BACKUP="$INSTALL_DIR/.env.anterior-$CARIMBO"
+    { ls -1t "$INSTALL_DIR"/.env.anterior-* 2>/dev/null | tail -n +4 | while IFS= read -r _velho; do
+      rm -f -- "$_velho"
+    done ; } || true
+
+    # CAUDA = toda linha antiga cuja chave NAO esta em GERENCIADAS, verbatim e na
+    # ordem antiga (comentario, linha em branco, chave do cliente, chave que o
+    # instalador nunca ouviu falar). Linha de chave GERENCIADA e descartada: o
+    # instalador acabou de reescrever, ou de proposito nao escreveu neste motor.
+    # A chave de uma linha em quarentena e lida de dentro da marca, senao uma
+    # gerenciada guardada voltaria como resto do motor anterior.
+    printf '%s' "$GERIDAS" | awk '
+      NR==FNR { if ($0 != "") gerida[$0]=1; next }
+      {
+        linha = $0
+        sub(/^#LEON-GUARDADO (fora-da-allowlist|repetida|formato|valor) /, "", linha)
+        if (match(linha, /^[ \t]*[A-Z][A-Z0-9_]*[ \t]*=/)) {
+          chave = linha
+          sub(/^[ \t]*/, "", chave)
+          sub(/[ \t]*=.*$/, "", chave)
+          if (chave in gerida) next
+        }
+        print $0
+      }
+    ' - "$ENVF" > "$OBRA/cauda"
+  fi
+
+  # PONTO 7 (o mais perigoso): quem responde "o bridge aceita esta chave?" e o
+  # PROPRIO bridge que vai rodar. Medido 17/09 no runtime servido:
+  # allowlistCliente() tem 224 nomes e so 3 das 10 chaves de integracao semeadas
+  # estao nela; as outras 7 so existem na manifestoAllowlist() (360). Preservar as
+  # 10 ATIVAS produziria um .env que o bridge recusa INTEIRO no boot (bridge.cjs
+  # 145, exit 1) e a casa nao subiria. Por isso a chave que o bridge recusa vira
+  # quarentena em vez de linha ativa, e por isso a lista NAO e copiada pra ca: ela
+  # fica onde ja e mantida (o manifesto do bridge) e o instalador so pergunta.
+  TMP_NOVO="$(mktemp "$INSTALL_DIR/.env.XXXXXX")" \
+    || { echo "ERRO: mktemp do .env falhou." >&2; rm -rf -- "$OBRA"; exit 1; }
+  cat > "$OBRA/validador.cjs" <<'VALIDADOR_ENV'
+'use strict';
+// Emprestado do bridge, nao reescrito aqui: as unicas listas consultadas sao
+// allowlistCliente()/manifestoAllowlist() do lib/integracoes.cjs recem-instalado,
+// e as checagens de linha sao as do readSafeEnvFile (bridge.cjs 111-125).
+const fs = require('fs');
+const [libPath, blocoPath, caudaPath, posicao, saidaPath, relPath] = process.argv.slice(2);
+const bloco = fs.readFileSync(blocoPath, 'utf8');
+let caudaBuf;
+try { caudaBuf = fs.readFileSync(caudaPath); } catch (e) { caudaBuf = Buffer.alloc(0); }
+
+const cruas = [];
+let ini = 0;
+for (let i = 0; i < caudaBuf.length; i++) {
+  if (caudaBuf[i] === 0x0a) { cruas.push(caudaBuf.slice(ini, i)); ini = i + 1; }
+}
+if (ini < caudaBuf.length) cruas.push(caudaBuf.slice(ini));
+
+// CAMINHO INVERSO: a marca sai ANTES de decidir, e sai por BYTES (linha que nao e
+// UTF-8 valido tem que sobreviver byte a byte). Chave que o bridge aprendeu desde
+// a ultima instalacao volta ativa sozinha na proxima reinstalacao.
+const PRE = /^#LEON-GUARDADO (?:fora-da-allowlist|repetida|formato|valor) /;
+const cand = cruas.map(function (b) {
+  const cabeca = b.slice(0, 64).toString('latin1');
+  const m = cabeca.match(PRE);
+  return m ? b.slice(m[0].length) : b;
+});
+
+const RE_LINHA = /^[ \t]*([A-Z][A-Z0-9_]*)[ \t]*=[ \t]*([\s\S]*?)[ \t]*$/;
+function chaveDe(t) {
+  if (!t.trim() || /^[ \t]*#/.test(t)) return null;
+  const m = t.match(RE_LINHA);
+  return m ? m[1] : null;
+}
+function unir(partes) {
+  if (!partes.length) return Buffer.alloc(0);
+  return Buffer.concat(partes.map(function (p) { return Buffer.concat([p, Buffer.from('\n')]); }));
+}
+
+const blocoBuf = Buffer.from(bloco, 'utf8');
+const candBuf = unir(cand);
+const textoCand = (posicao === 'fim')
+  ? Buffer.concat([candBuf, blocoBuf]).toString('utf8')
+  : Buffer.concat([blocoBuf, candBuf]).toString('utf8');
+
+let ALLOWED = null, perfil = 'cliente', consultou = 0;
+try {
+  const integ = require(libPath);
+  // MESMA regra de peek do bridge.cjs 73-84: so procura a linha, nao promove nada.
+  perfil = /^\s*LEON_ALLOWLIST_FULL\s*=\s*["']?1["']?\s*(?:#.*)?$/m.test(textoCand) ? 'dono' : 'cliente';
+  const lista = perfil === 'dono' ? integ.manifestoAllowlist() : integ.allowlistCliente();
+  if (lista && typeof lista.has === 'function' && lista.size > 0) { ALLOWED = lista; consultou = 1; }
+} catch (e) { ALLOWED = null; }
+
+let saidaCauda;
+const guardadas = [];
+if (!consultou) {
+  // Sem poder perguntar ao bridge, nada muda de estado: a cauda sai VERBATIM, com
+  // as marcas que ja tinha. Nao guarda ninguem novo e nao solta ninguem no escuro.
+  saidaCauda = cruas;
+} else {
+  const ultimo = new Map();
+  cand.forEach(function (b, i) {
+    const s = b.toString('utf8');
+    const ok = Buffer.byteLength(s, 'utf8') === b.length && s.indexOf('\u0000') < 0;
+    const k = ok ? chaveDe(s) : null;
+    if (k) ultimo.set(k, i);
+  });
+  const doBloco = new Set();
+  bloco.split('\n').forEach(function (l) { const k = chaveDe(l); if (k) doBloco.add(k); });
+
+  function marcar(motivo, buf, chave, i) {
+    guardadas.push(motivo + ' ' + (chave || ('linha:' + (i + 1))));
+    return Buffer.concat([Buffer.from('#LEON-GUARDADO ' + motivo + ' '), buf]);
+  }
+  saidaCauda = cand.map(function (b, i) {
+    const s = b.toString('utf8');
+    const ok = Buffer.byteLength(s, 'utf8') === b.length && s.indexOf('\u0000') < 0;
+    if (!ok) return marcar('formato', b, null, i);
+    if (!s.trim() || /^[ \t]*#/.test(s)) return b;   // branco e comentario passam intactos
+    const m = s.match(RE_LINHA);
+    if (!m) return marcar('formato', b, null, i);
+    const k = m[1];
+    // repetida: o bridge recusa o ARQUIVO inteiro em chave repetida (bridge.cjs
+    // 115), entao a ULTIMA ocorrencia fica ativa e as anteriores ficam guardadas.
+    if (doBloco.has(k) || ultimo.get(k) !== i) return marcar('repetida', b, k, i);
+    if (!ALLOWED.has(k)) return marcar('fora-da-allowlist', b, k, i);
+    let v = m[2].replace(/\s+#.*$/, '').trim();
+    if ((v.charAt(0) === '"' && v.slice(-1) === '"') || (v.charAt(0) === "'" && v.slice(-1) === "'")) v = v.slice(1, -1);
+    if (/[\r\n\u0000]/.test(v) || v.length > 8192) return marcar('valor', b, k, i);
+    return b;
+  });
+}
+
+const caudaFinal = unir(saidaCauda);
+const saida = (posicao === 'fim')
+  ? Buffer.concat([caudaFinal, blocoBuf])
+  : Buffer.concat([blocoBuf, caudaFinal]);
+const fd = fs.openSync(saidaPath, 'w', 0o600);
+fs.writeSync(fd, saida);
+fs.fsyncSync(fd);
+fs.closeSync(fd);
+fs.writeFileSync(relPath, 'CONSULTOU=' + consultou + '\nPERFIL=' + perfil + '\n'
+  + guardadas.map(function (g) { return 'GUARDADA ' + g; }).join('\n')
+  + (guardadas.length ? '\n' : ''));
+VALIDADOR_ENV
+
+  NODEBIN=""
+  [ -x /usr/bin/node ] && NODEBIN=/usr/bin/node
+  [ -z "$NODEBIN" ] && NODEBIN="$(command -v node 2>/dev/null || true)"
+  : > "$OBRA/relatorio"
+  if [ -n "$NODEBIN" ] && [ -f "$INSTALL_DIR/lib/integracoes.cjs" ] \
+     && "$NODEBIN" "$OBRA/validador.cjs" "$INSTALL_DIR/lib/integracoes.cjs" \
+        "$OBRA/bloco" "$OBRA/cauda" "$POS" "$TMP_NOVO" "$OBRA/relatorio" 2>"$OBRA/erro"; then
+    :
+  else
+    # Sem node ou sem lib/integracoes.cjs (o stub do MOCK nao tem): preserva tudo
+    # como estava e DIZ que nao consultou a allowlist, em vez de chutar uma lista.
+    if [ "$POS" = fim ]; then
+      cat -- "$OBRA/cauda" "$OBRA/bloco" > "$TMP_NOVO"
+    else
+      cat -- "$OBRA/bloco" "$OBRA/cauda" > "$TMP_NOVO"
+    fi
+    sync -- "$TMP_NOVO" 2>/dev/null || true
+    printf 'CONSULTOU=0\nPERFIL=cliente\n' > "$OBRA/relatorio"
+  fi
+
+  chmod 600 "$TMP_NOVO"
+  mv -f -- "$TMP_NOVO" "$ENVF"
+  chmod 600 "$ENVF"
+
+  _ENV_RELATORIO="$(cat -- "$OBRA/relatorio")"
+  rm -rf -- "$OBRA"
+  trap - RETURN
+}
+
+# resumo_env_preservado: so NOMES de chave, NUNCA valor. Diz o que ficou guardado
+# e por que, e quais chaves do instalador mudaram de valor nesta passada.
+resumo_env_preservado() {
+  local ANTES="${1:-}" GUARDADAS MUDADAS QUANTAS
+  if printf '%s\n' "$_ENV_RELATORIO" | grep -q '^CONSULTOU=0$'; then
+    echo ">> .env: nao consultei a allowlist do bridge (runtime ainda sem lib/integracoes.cjs)."
+    echo "   preservei TODAS as linhas do .env anterior exatamente como estavam."
+  fi
+  GUARDADAS="$(printf '%s\n' "$_ENV_RELATORIO" | sed -n 's/^GUARDADA //p')"
+  if [ -n "$GUARDADAS" ]; then
+    QUANTAS="$(printf '%s\n' "$GUARDADAS" | wc -l | tr -d ' ')"
+    echo ">> .env: $QUANTAS linha(s) que o bridge desta versao nao aceita ficaram GUARDADAS"
+    echo "   no proprio .env, comentadas com #LEON-GUARDADO. Nada foi apagado: o valor"
+    echo "   continua la, no mesmo arquivo 600 e na mesma posicao."
+    printf '%s\n' "$GUARDADAS" | sed 's/^\([a-z:-]*\) /   - \1: /'
+    echo "   chave guardada NAO alimenta a integracao ate o bridge aprender a chave;"
+    echo "   quando ele aprender, a proxima reinstalacao devolve a linha sozinha."
+  fi
+  if [ -n "$ANTES" ] && [ -f "$ANTES" ]; then
+    MUDADAS="$(awk -F= '
+      NR==FNR { if ($0 ~ /^[A-Z][A-Z0-9_]*=/) { k=$1; v=$0; sub(/^[^=]*=/,"",v); velho[k]=v } next }
+      $0 ~ /^[A-Z][A-Z0-9_]*=/ { k=$1; v=$0; sub(/^[^=]*=/,"",v); if ((k in velho) && velho[k] != v) print k }
+    ' "$ANTES" "$INSTALL_DIR/.env" | sort -u | tr '\n' ' ')"
+    [ -n "$MUDADAS" ] && echo ">> .env: chaves do instalador que mudaram de valor nesta instalacao: $MUDADAS"
+  fi
+  return 0
+}
+
+_ENV_GERENCIADAS="$(_env_nomes_gerenciadas)"
+
+_ENV_BLOCO_NOVO="$(_env_bloco_a)
+"
+if [ "$LEON_ENGINE" = codex ] || [ "$LEON_ENGINE" = claude ]; then
+  _ENV_BLOCO_NOVO="$_ENV_BLOCO_NOVO$(_env_bloco_b)
+"
+  mkdir -p "$LEON_TMPDIR" "$LEON_DATA_DIR/brain" \
+    "$LEON_DATA_DIR/persona" "$LEON_WORK_AREA" "$LEON_STATE_DIR" "$LEON_MISSIONS_DIR" \
+    "$LEON_PROMISES_DIR" "$LEON_MISSION_OUTPUT_DIR"
+  chmod 700 "$LEON_DATA_DIR" "$LEON_TMPDIR" "$LEON_STATE_DIR" "$LEON_MISSION_OUTPUT_DIR"
+fi
+
+if [ "$LEON_ENGINE" = claude ]; then
+  _ENV_BLOCO_NOVO="$_ENV_BLOCO_NOVO$(_env_bloco_c)
+"
+  mkdir -p "$LEON_DATA_DIR/claude"
+  chmod 700 "$LEON_DATA_DIR/claude"
+fi
+
+if [ "$LEON_ENGINE" = codex ]; then
+  CODEX_BIN_ENV="${LEON_CODEX_BIN_RESOLVED:-$LEON_DATA_DIR/codex-cli/releases/$LEON_CODEX_CLI_VERSION/bin/codex}"
+  _ENV_BLOCO_NOVO="$_ENV_BLOCO_NOVO$(_env_bloco_d)
+"
   mkdir -p "$LEON_CODEX_HOME"
   chmod 700 "$LEON_CODEX_HOME"
+fi
+
+escreve_env_preservando "$_ENV_BLOCO_NOVO" "$_ENV_GERENCIADAS" topo
+# A copia de seguranca que a propria funcao acabou de fazer serve de "antes":
+# assim nao existe uma segunda copia do .env em /tmp nem temp solto se abortar.
+resumo_env_preservado "$_ENV_BACKUP"
+
+if [ "$LEON_ENGINE" = codex ]; then
   # Decisão do dono 04/09: mesmo modo do mestre, acesso total. Provado no 99: com
   # default_permissions = "leon" + seções [permissions.leon.*] o Codex mantém o
   # isolamento ligado mesmo sob sandbox_mode = "danger-full-access" (cai em
@@ -2541,12 +2891,22 @@ except Exception:
 print(key if re.fullmatch(r"[A-Za-z0-9_-]{8,128}", key) else "")
 ')
     if [ -n "$LICENSE_KEY" ]; then
-      if grep -q "^LEON_LICENSE_KEY=" .env 2>/dev/null; then
-        grep -v "^LEON_LICENSE_KEY=" .env > .env.key-new && mv -f .env.key-new .env
-      fi
-      printf 'LEON_LICENSE_KEY=%s\n' "$LICENSE_KEY" >> .env
-      chmod 600 .env
+      # 17/09: este passo tinha o mesmo furo do 2.5 em miniatura. O ".env.key-new"
+      # nascia sob o umask de login (022), ou seja, 644 com a chave dentro por um
+      # instante, e o grep -v jogava fora a linha antiga sem motivo. Agora passa
+      # pela mesma funcao, com GERENCIADAS={LEON_LICENSE_KEY}: substitui se existe,
+      # acrescenta no fim se nao existe, e todo o resto do arquivo volta verbatim.
+      _ENV_BLOCO_LIC="LEON_LICENSE_KEY=$LICENSE_KEY
+"
+      escreve_env_preservando "$_ENV_BLOCO_LIC" 'LEON_LICENSE_KEY' fim
       echo ">> licenca ativa e chave gravada no .env."
+    elif awk '/^[ \t]*LEON_LICENSE_KEY[ \t]*=/{achou=1} END{exit !achou}' "$INSTALL_DIR/.env" 2>/dev/null; then
+      # 17/09: com a escrita que preserva, a chave que ja estava no .env continua
+      # la quando a central nao devolve nada. Mandar pedir ao suporte aqui seria
+      # mensagem falsa, igual a das habilidades.
+      echo "ATENCAO: a central ativou mas nao devolveu a chave da licenca."
+      echo "Mantive a LEON_LICENSE_KEY que ja estava nesta casa, entao o controle de"
+      echo "licenca do agente continua ligado. Nada a fazer."
     else
       echo "ATENCAO: a central ativou mas nao devolveu a chave da licenca."
       echo "O agente sobe e funciona, porem sem LEON_LICENSE_KEY no .env o controle de"

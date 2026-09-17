@@ -1808,8 +1808,16 @@ service_in_transition() {
   return 1
 }
 
+# Guarda o MOTIVO da reprovacao no proprio tx. Antes disto a central recebia
+# so "prova de saude falhou", sem dizer o que falhou, e a casa ficava sem
+# diagnostico util: falha calada e o defeito que mais custa tempo na frota.
+health_motivo() {
+  printf '%s\n' "$2" > "$1/health-reason" 2>/dev/null || true
+}
+
 health_smoke() {
   local tx="$1" live expected expected_skills skills_path attempts stable_sleep pid1 pid2 i
+  local restart_at alive_wait alive_ok alive_m pid3
   live="$(tx_read "$tx" live-path)"
   expected="$(tx_read "$tx" bridge-sha256)"
   expected_skills="$(tx_read "$tx" skills-expected-digest)"
@@ -1851,12 +1859,50 @@ health_smoke() {
     i=$((i + 1))
     sleep 1
   done
-  [ "$pid1" -gt 0 ] || return 1
+  [ "$pid1" -gt 0 ] || { health_motivo "$tx" "unit nao assentou em active com pid valido"; return 1; }
   sleep "$stable_sleep"
   pid2="$(service_read show -p MainPID --value "$SERVICE" 2>/dev/null || echo 0)"
-  [ "$pid1" = "$pid2" ] && service_read is-active "$SERVICE" >/dev/null 2>&1 || return 1
-  ! service_in_transition || return 1
-  telegram_smoke "$live"
+  [ "$pid1" = "$pid2" ] && service_read is-active "$SERVICE" >/dev/null 2>&1 \
+    || { health_motivo "$tx" "pid nao ficou estavel ($pid1 -> $pid2) ou unit saiu de active"; return 1; }
+  ! service_in_transition || { health_motivo "$tx" "unit voltou a transitar depois do pid estavel"; return 1; }
+  # PROVA DE HEARTBEAT (16/09). Ate aqui a prova dizia "servico de pe com pid
+  # estavel por 3s", e isso aprova agente que SOBE e nao trabalha: o bridge pode
+  # ficar ativo sem nunca voltar a atender. Medido na frota: uma casa passou na
+  # prova varias vezes ao dia enquanto reinstalava em loop.
+  # O bridge escreve .alive a cada ciclo BEM-SUCEDIDO de leitura do Telegram.
+  # Exigimos .alive com mtime POSTERIOR ao marco do restart: prova que o
+  # processo novo chegou a trabalhar, nao so a existir.
+  # O teto de 90s tem conta: o boot mede menos de 1s na bancada, mas o ciclo do
+  # Telegram e long-poll de 30s e um ciclo pendurado leva 45s. Pior caso honesto
+  # 78s; 90 da margem e cabe folgado na trava de 600s do finalizador.
+  restart_at="$(tx_read "$tx" restart-at 2>/dev/null || true)"
+  case "$restart_at" in
+    ''|*[!0-9]*)
+      # Transacao aberta por atualizador antigo, sem marco: mantem o
+      # comportamento de antes em vez de reprovar por falta de dado.
+      ;;
+    *)
+      alive_wait="${LEON_HEALTH_ALIVE_WAIT:-90}"
+      alive_ok=0
+      i=0
+      while [ "$i" -lt "$alive_wait" ]; do
+        alive_m="$(stat -c %Y "$live/.alive" 2>/dev/null || echo 0)"
+        case "$alive_m" in ''|*[!0-9]*) alive_m=0 ;; esac
+        if [ "$alive_m" -gt "$restart_at" ]; then alive_ok=1; break; fi
+        pid3="$(service_read show -p MainPID --value "$SERVICE" 2>/dev/null || echo 0)"
+        case "$pid3" in ''|*[!0-9]*) pid3=0 ;; esac
+        if [ "$pid3" != "$pid1" ]; then
+          health_motivo "$tx" "pid trocou esperando heartbeat ($pid1 -> $pid3): o bridge caiu e o systemd subiu outro"
+          return 1
+        fi
+        i=$((i + 1))
+        sleep 1
+      done
+      [ "$alive_ok" = 1 ] \
+        || { health_motivo "$tx" "sem heartbeat (.alive) ate ${alive_wait}s depois do restart: unit ativa mas o bridge nao voltou a atender"; return 1; }
+      ;;
+  esac
+  telegram_smoke "$live" || { health_motivo "$tx" "smoke do Telegram falhou"; return 1; }
 }
 
 # Report de versao HONESTO: so chamado pelo finalizador, com a versao REAL que ficou
@@ -2031,7 +2077,9 @@ finalize_transaction() {
   report_version_from_tx "$tx" prev-version
   # F1.5: rastro do ciclo que reverteu na central (sinal da frota). Sem isso, a madrugada
   # que falhava sumia: a central so via a versao antiga e nao sabia que houve tentativa.
-  report_diagnostico_from_tx "$tx" erro "prova de saude falhou; reverteu pra versao anterior"
+  # O motivo nomeado, quando a prova gravou um: falha calada custa dias de
+  # diagnostico numa casa remota.
+  report_diagnostico_from_tx "$tx" erro "prova de saude falhou ($(cat "$tx/health-reason" 2>/dev/null || echo 'motivo nao registrado')); reverteu pra versao anterior"
   rmdir -- "$lock_dir" 2>/dev/null || true
   trap - RETURN
   return 1
@@ -2207,6 +2255,12 @@ LEON_CODEX_CLI_MINIMA="0.147.0"
 # Default alinhado com o bridge (bridge.cjs codexBin() e lib-motores/codex-appserver.cjs):
 # .env sem a variavel = casa da frota antiga, que roda 0.147.0. Cravar 0.153.3 aqui fazia o
 # updater procurar um diretorio de release que a casa nunca teve e morrer antes de comecar.
+# 17/09 (causa provada na casa de bancada c01): esta linha caia direto no PISO porque
+# LEON_CODEX_CLI_VERSION so era lido do AMBIENTE do processo (linha ~2066), nunca do .env da
+# casa, ao contrario de todas as outras chaves, que usam env_get_from. A casa declarava
+# LEON_CODEX_CLI_VERSION=0.154.0 e tinha a release no disco; o updater assumia 0.147.0, exigia
+# um diretorio que nunca existiu e morria com codigo 1, calado, todas as madrugadas.
+[ -n "$LEON_CODEX_CLI_VERSION" ] || LEON_CODEX_CLI_VERSION="$(env_get_from "$ENV_READ_SAFE" LEON_CODEX_CLI_VERSION)"
 [ -n "$LEON_CODEX_CLI_VERSION" ] || LEON_CODEX_CLI_VERSION="$LEON_CODEX_CLI_MINIMA"
 [ -n "$LEON_SKILLS_DIR" ] || LEON_SKILLS_DIR="$LEON_DATA_DIR/skills"
 [ -n "$LEON_TMPDIR" ] || LEON_TMPDIR="$LEON_DATA_DIR/tmp"
@@ -2215,22 +2269,35 @@ LEON_CODEX_CLI_MINIMA="0.147.0"
 [ -n "$LEON_MISSIONS_DIR" ] || LEON_MISSIONS_DIR="$LEON_STATE_DIR/missions"
 [ -n "$LEON_PROMISES_DIR" ] || LEON_PROMISES_DIR="$LEON_STATE_DIR/promises"
 [ -n "$LEON_MISSION_OUTPUT_DIR" ] || LEON_MISSION_OUTPUT_DIR="$LEON_DATA_DIR/mission-output"
-EXPECTED_NODE_BIN="$LEON_DATA_DIR/node/releases/$LEON_NODE_VERSION/bin/node"
+# 17/09 (causa provada em casa de bancada Claude): a exigencia do Node dedicado estava 19
+# linhas ACIMA do portao por motor, entao valia para a casa Claude tambem. A casa Claude usa o
+# Node do sistema (/usr/bin/node), nunca teve o dedicado, e morria aqui com codigo 1 dizendo
+# "Rode novamente o instalador Codex". Como o instalador agenda a atualizacao automatica de
+# hora em hora no minuto 13, o cliente levava esse erro na primeira hora depois de instalar,
+# sem ter digitado nada. O portao sobe para ca e o caminho do Node passa a depender do motor.
+LEON_ENGINE_CASA="$(env_get_from "$ENV_READ_SAFE" ENGINE_DEFAULT)"
+[ -n "$LEON_ENGINE_CASA" ] || LEON_ENGINE_CASA="$(env_get_from "$ENV_READ_SAFE" ENGINE)"
+case "$LEON_ENGINE_CASA" in claude) ;; *) LEON_ENGINE_CASA=codex ;; esac
+if [ "$LEON_ENGINE_CASA" = claude ]; then
+  EXPECTED_NODE_BIN=/usr/bin/node
+else
+  EXPECTED_NODE_BIN="$LEON_DATA_DIR/node/releases/$LEON_NODE_VERSION/bin/node"
+fi
 if [ "$TEST_MODE" = "1" ] && [ -n "$NODE_BIN" ]; then
   : # Fixture explícita; produção nunca aceita override do executável.
 else
   NODE_BIN="$EXPECTED_NODE_BIN"
 fi
 command -v "$NODE_BIN" >/dev/null 2>&1 \
-  || fatal "o runtime Node dedicado está ausente. Rode novamente o instalador Codex antes do /atualiza."
-if [ "$TEST_MODE" != "1" ] || [ "$NODE_BIN" = "$EXPECTED_NODE_BIN" ]; then
+  || fatal "o runtime Node desta casa ($LEON_ENGINE_CASA) não está no lugar esperado ($EXPECTED_NODE_BIN). Rode novamente o instalador desta casa antes do /atualiza."
+if [ "$LEON_ENGINE_CASA" = codex ] && { [ "$TEST_MODE" != "1" ] || [ "$NODE_BIN" = "$EXPECTED_NODE_BIN" ]; }; then
   validate_dedicated_node "$NODE_BIN" "$LEON_DATA_DIR" "$LEON_NODE_VERSION" \
     || fatal "o runtime Node dedicado está ausente ou inseguro. Rode novamente o instalador Codex antes do /atualiza."
   [ "$($NODE_BIN --version 2>/dev/null || true)" = "v$LEON_NODE_VERSION" ] \
     || fatal "o runtime Node dedicado é incompatível. Rode novamente o instalador Codex antes do /atualiza."
 fi
 validate_service_unit "$UNIT_PATH" "$INSTALL_DIR" "$NODE_BIN" "$(id -un)" \
-  || fatal "a unit do LEON não usa o runtime dedicado e o perfil endurecido. Rode novamente o instalador Codex antes do /atualiza."
+  || fatal "a unit do LEON não usa o runtime esperado nem o perfil endurecido. Rode novamente o instalador desta casa antes do /atualiza."
 SKILLS_STAGE="$LEON_DATA_DIR/.skills-stage-$TX_ID"
 SKILLS_BACKUP="$LEON_DATA_DIR/.skills-backup-$TX_ID"
 SKILLS_FAILED="$LEON_DATA_DIR/.skills-failed-$TX_ID"
@@ -2382,6 +2449,28 @@ printf '%s\n' "$(env_get_from "$ENV_READ_SAFE" LEON_MACHINE_ID)" > "$TX_DIR/repo
 printf '%s\n' "${LEON_UPDATE_AUTO:+1}" > "$TX_DIR/report-auto" 2>/dev/null || true
 # prev-version pro report honesto no rollback (o TX_DIR ja existe desde a preparacao).
 printf '%s\n' "$INSTALLED_RELEASE_VERSION" > "$TX_DIR/prev-version" 2>/dev/null || true
+# FREIO DE VERSAO IGUAL (16/09). Antes daqui, versao igual com digest igual era
+# ACEITA e o script seguia: baixava o pacote, trocava os arquivos e REINICIAVA o
+# agente do dono. Medido na frota: uma casa reinstalou a MESMA release 4x em 50
+# segundos, 2x no dia seguinte, e numa madrugada reprovou na prova de saude e
+# reverteu. Cada reinstalacao reinicia o agente e mata o trabalho em andamento.
+# Nada a fazer e uma resposta legitima, e precisa ser reportada, senao a
+# madrugada desaparece do rastro da central.
+if [ "${LEON_FORCE:-}" != 1 ] \
+  && [ -n "${INSTALLED_RELEASE_DIGEST:-}" ] \
+  && [ "$version" = "$INSTALLED_RELEASE_VERSION" ] \
+  && [ "$RELEASE_MANIFEST_SHA256" = "$INSTALLED_RELEASE_DIGEST" ]; then
+  say "ja na versao $version com o mesmo digest; nada a trocar (LEON_FORCE=1 reinstala mesmo assim)"
+  report_diagnostico_from_tx "$TX_DIR" ok "ja na versao $version; nada a fazer" 2>/dev/null || true
+  # Pedido humano merece resposta; ciclo da madrugada fica em silencio, mesma
+  # doutrina do resto do script.
+  if [ -n "${CHAT_ARG:-}" ] || [ -z "${LEON_UPDATE_AUTO:-}" ]; then
+    notify_from_runtime "$INSTALL_DIR" "✅ Já estou na versão $version. Nada pra trocar." "${THREAD_ARG:-}" "${CHAT_ARG:-}" 2>/dev/null || true
+  fi
+  printf 'skipped\n' > "$TX_DIR/status" 2>/dev/null || true
+  exit 0
+fi
+[ "${LEON_FORCE:-}" != 1 ] || say "LEON_FORCE=1: reinstalando $version por ordem do dono"
 release_identity_acceptable "$version" "$RELEASE_MANIFEST_SHA256" "$INSTALLED_RELEASE_VERSION" "${INSTALLED_RELEASE_DIGEST:-}" \
   || fatal "manifesto assinado é downgrade, replay ambíguo ou equivoca a release $INSTALLED_RELEASE_VERSION."
 
@@ -3002,7 +3091,12 @@ fi
 # report_version_from_tx() + os call sites em finalize_transaction().
 
 say "commit atomico concluido; reiniciando $SERVICE"
+# Marco do instante do restart. A prova de saude precisa saber que o heartbeat
+# que ela le e do processo NOVO: sem marco, um .alive escrito pelo processo
+# antigo passaria por prova. O tx e o canal certo porque o restart mata este
+# script junto, e quem confere depois e o finalizador no cron.
 if [ "$TEST_MODE" = "1" ]; then
+  date +%s > "$TX_DIR/restart-at" 2>/dev/null || true
   service_write restart "$SERVICE"
   MUTATION_STARTED=0
   # Solta a trava so DEPOIS do restart: o finalizador daqui roda inline, mas o cron
@@ -3018,6 +3112,7 @@ fi
 # finalizador ja esta no cron e assume a prova de estabilidade ou o rollback.
 RESTARTING=1
 set +e
+date +%s > "$TX_DIR/restart-at" 2>/dev/null || true
 service_write restart "$SERVICE"
 RESTART_STATUS=$?
 set -e
