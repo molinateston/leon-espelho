@@ -1212,11 +1212,233 @@ finally:
 PY
 }
 
-filter_user_env() {
-  local source="$1" destination="$2"
-  "$PYTHON_BIN" - "$source" "$destination" <<'PY'
+# ---- FAMILIA DO RUNTIME E LEDGER DE SALAS (17/09) --------------------------
+# POR QUE ISTO EXISTE: medido hoje, 17/09, o bridge.cjs instalado nas casas de
+# CLIENTE tem ZERO ocorrencias de _resolveSessionsFile e le o ledger de salas no
+# caminho literal ${WORKDIR}/sessions.json, ou seja INSTALL_DIR/sessions.json. O
+# runtime NOVO resolve o ledger por _resolveSessionsFile e le em
+# LEON_STATE_DIR/sessions.json (default LEON_DATA_DIR/state). Trocar um pelo
+# outro sem copiar o ledger faz a casa acordar com TODAS as salas vazias e log
+# verde (na casa do dono seriam 359 salas). A copia validada abaixo e o que
+# falta para o cliente receber o agente novo de verdade.
+#
+# A familia e decidida pelo CODIGO QUE VAI RODAR, nunca por numero de versao,
+# sha conhecido ou campo do manifesto: o manifesto assinado nao tem campo de
+# familia e verify_release_manifest reprova chave desconhecida. Dois sinais que
+# precisam CONCORDAR; qualquer outra combinacao e 'indeterminada' e vira recusa
+# nomeada ANTES de mutar (um bridge transicional com os dois literais nao pode
+# ser chutado para nenhum lado).
+familia_do_bridge() {
+  local arquivo="$1" tem_fn=0 tem_uso=0 tem_legado=0
+  if [ ! -f "$arquivo" ] || [ -L "$arquivo" ]; then printf 'indeterminada\n'; return 0; fi
+  if LC_ALL=C grep -q 'function _resolveSessionsFile(' -- "$arquivo" 2>/dev/null; then tem_fn=1; fi
+  if LC_ALL=C grep -Eq 'SESS_FILE[[:space:]]*=[[:space:]]*_resolveSessionsFile\(\)' -- "$arquivo" 2>/dev/null; then tem_uso=1; fi
+  if LC_ALL=C grep -Eq 'SESS_FILE[[:space:]]*=[[:space:]]*`\$\{WORKDIR\}/sessions\.json`' -- "$arquivo" 2>/dev/null; then tem_legado=1; fi
+  if [ "$tem_fn" = 1 ] && [ "$tem_uso" = 1 ] && [ "$tem_legado" = 0 ]; then printf 'nova\n'; return 0; fi
+  if [ "$tem_legado" = 1 ] && [ "$tem_fn" = 0 ] && [ "$tem_uso" = 0 ]; then printf 'legada\n'; return 0; fi
+  printf 'indeterminada\n'
+}
+
+# Chaves de SALA (nao descartaveis) de um mapa de sessoes, uma por linha.
+# Predicado IDENTICO ao sessaoDescartavel do bridge: corta em '#p', separa por
+# ':', descarta quando p[0] ou p[1] e 'missao' ou 'promise'. Conferir por
+# CONTAGEM TOTAL reprovaria release boa: as duas familias podam no boot as
+# entradas de missao/promessa mortas (7 dias, sem rollout no disco). 'SALA NUNCA
+# SAI' e o contrato escrito no bridge e e o que a conferencia cobra.
+ledger_salas_de() {
+  "$PYTHON_BIN" - "$1" <<'PY'
+import json,sys
+try: data=json.load(open(sys.argv[1],encoding="utf-8"))
+except Exception: raise SystemExit(1)
+if not isinstance(data,dict): raise SystemExit(1)
+def descartavel(k):
+    p=str(k).split("#p")[0].split(":")
+    return p[0] in ("missao","promise") or (len(p)>1 and p[1] in ("missao","promise"))
+for k in sorted(data):
+    if not descartavel(k): sys.stdout.write(k+"\n")
+PY
+}
+
+# Prepara o diretorio de estado que o runtime ENTRANTE vai resolver, com as
+# MESMAS exigencias do bridge novo (_resolveSessionsFile + _recusaComponenteSimbolico):
+# nenhum componente simbolico, diretorio real 0700 sem bits de grupo/outros e
+# dono igual a quem roda a unit. O bridge novo recusa o boot com exit 78 quando
+# isso nao bate, e recusar aqui acontece com a casa ainda intacta.
+# argv[2] = INSTALL_DIR, so para descobrir o dono da casa: o atualizador roda
+# como o usuario da unit (o script ja assume isso em validate_service_unit) e a
+# unica excecao e a bancada rodando como root, onde ajustamos o dono.
+ledger_prepara_destino() {
+  "$PYTHON_BIN" - "$1" "$2" <<'PY'
+import os,stat,sys
+alvo,casa=sys.argv[1:]
+if not os.path.isabs(alvo) or os.path.normpath(alvo)!=alvo: raise SystemExit(2)
+dono=os.stat(casa).st_uid
+atual=os.sep
+for parte in alvo.split(os.sep)[1:]:
+    atual=os.path.join(atual,parte)
+    try: st=os.lstat(atual)
+    except FileNotFoundError: continue
+    if stat.S_ISLNK(st.st_mode): raise SystemExit(3)
+    if atual!=alvo and not stat.S_ISDIR(st.st_mode): raise SystemExit(4)
+os.makedirs(alvo,mode=0o700,exist_ok=True)
+st=os.lstat(alvo)
+if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode): raise SystemExit(5)
+if stat.S_IMODE(st.st_mode)&0o022: os.chmod(alvo,stat.S_IMODE(st.st_mode)&~0o022)
+if os.geteuid()==0:
+    if os.lstat(alvo).st_uid!=dono: os.chown(alvo,dono,-1)
+elif os.lstat(alvo).st_uid!=os.getuid() or dono!=os.getuid(): raise SystemExit(6)
+if os.stat(alvo).st_mode&0o022: raise SystemExit(7)
+PY
+}
+
+# A3 (revisao Astra 17/09): o runtime NOVO HONRA LEON_SESSIONS_FILE, mas so quando
+# o caminho e absoluto, normalizado e mora DIRETO em LEON_STATE_DIR (bridge.cjs
+# _resolveSessionsFile: path.isAbsolute + path.resolve igual + path.dirname ===
+# resolve(LEON_STATE_DIR); fora disso o boot morre com exit 78). Entao a presenca da
+# chave NUNCA pode abortar o update: se o caminho e honrado, ele vira o DESTINO do
+# ledger e a chave fica ativa; se nao e, a chave vira comentario guardado e o destino
+# volta ao padrao. Este predicado e a copia fiel do que o bridge cobra.
+ledger_sessions_file_honrado() {
+  "$PYTHON_BIN" - "$1" "$2" <<'PY'
+import os,sys
+alvo,raiz=sys.argv[1:]
+alvo=alvo.strip()
+if not alvo: raise SystemExit(1)
+if not os.path.isabs(alvo) or os.path.normpath(alvo)!=alvo: raise SystemExit(2)
+if os.path.dirname(alvo)!=os.path.normpath(os.path.abspath(raiz)): raise SystemExit(3)
+PY
+}
+
+# Transforma as linhas ATIVAS de UMA chave em comentario "#LEON-GUARDADO <motivo>",
+# sem perder o valor e sem tocar em mais nada do arquivo. Usado quando a chave do
+# cliente derrubaria o boot do runtime novo: guardar e sempre melhor que abortar o
+# update (que congela a casa) ou apagar a linha (que perde a configuracao dele).
+# MOTIVO 'migrado' de proposito NAO entra no PRE de filter_user_env: a linha fica
+# guardada pra sempre, porque revive-la voltaria a derrubar o boot.
+env_guarda_chave() {
+  "$PYTHON_BIN" - "$1" "$2" "$3" <<'PY'
 import os,re,sys
-source,destination=sys.argv[1:]
+arquivo,chave,motivo=sys.argv[1:]
+if not re.fullmatch(r"[A-Z][A-Z0-9_]*",chave): raise SystemExit(1)
+if not re.fullmatch(r"[a-z][a-z-]*",motivo): raise SystemExit(1)
+RE=re.compile(r"\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*")
+linhas=open(arquivo,encoding="utf-8").read().splitlines()
+saida=[];tocou=0
+for l in linhas:
+    m=RE.fullmatch(l) if (l.strip() and not l.lstrip().startswith("#")) else None
+    if m and m.group(1)==chave:
+        saida.append("#LEON-GUARDADO "+motivo+" "+l); tocou+=1
+    else:
+        saida.append(l)
+if not tocou: raise SystemExit(4)
+temp=arquivo+".guarda-new"
+fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
+try: os.write(fd,"".join(x+"\n" for x in saida).encode()); os.fsync(fd)
+finally: os.close(fd)
+os.replace(temp,arquivo)
+PY
+}
+
+# Pre-voo do arquivo migrado: o mesmo predicado que _resolveSessionsFile aplica
+# no boot. Reprovar aqui e fatal ANTES do 'committed', com rollback_inline
+# desfazendo os dois renames e sem nenhum restart.
+ledger_pre_voo() {
+  "$PYTHON_BIN" - "$1" <<'PY'
+import os,stat,sys
+arquivo=sys.argv[1]; raiz=os.path.dirname(arquivo)
+if not os.path.isabs(arquivo) or os.path.normpath(arquivo)!=arquivo: raise SystemExit(2)
+d=os.lstat(raiz)
+if not stat.S_ISDIR(d.st_mode) or stat.S_ISLNK(d.st_mode) or (d.st_mode&0o022): raise SystemExit(3)
+f=os.lstat(arquivo)
+if not stat.S_ISREG(f.st_mode) or stat.S_ISLNK(f.st_mode) or f.st_nlink!=1 \
+   or stat.S_IMODE(f.st_mode)!=0o600: raise SystemExit(4)
+if os.geteuid()!=0 and (d.st_uid!=os.getuid() or f.st_uid!=os.getuid()): raise SystemExit(5)
+PY
+}
+
+# ---- .ENV DO CLIENTE: PRESERVAR, NUNCA APAGAR (17/09) ----------------------
+# POR QUE ISTO MUDOU: ate hoje filter_user_env mantinha SO os ~40 nomes da lista
+# fixa abaixo e DESCARTAVA todo o resto do .env. Chave de integracao que o cliente
+# configurou (Notion, Cakto, Zernio, Apify, Meta, OpenAI, Google) nao esta nessa
+# lista, entao cada /atualiza do cron apagava a integracao do cliente em silencio,
+# com log verde. Medido na bancada em 18/09: 6 de 6 chaves plantadas sumiram.
+# A LEI DO DONO: quem atualiza ou reinstala NAO perde integracao, brain nem contexto.
+#
+# A REGRA NOVA e a MESMA do instalador consertado (escreve_env_preservando):
+#   - quem responde "o bridge aceita esta chave?" e o PROPRIO bridge que vai subir,
+#     o do STAGE, por allowlistCliente()/manifestoAllowlist() de lib/integracoes.cjs.
+#     A lista NAO e copiada para ca: ela fica onde ja e mantida e o updater pergunta.
+#   - chave aceita fica ATIVA com o valor intacto.
+#   - chave que o bridge NAO aceita vira COMENTARIO "#LEON-GUARDADO ... CHAVE=valor".
+#     A allowlist do bridge e tudo-ou-nada (uma chave desconhecida recusa o .env
+#     INTEIRO e a casa nao sobe), entao guardar e o unico jeito de nao perder o valor
+#     sem derrubar o boot. Comentario o bridge pula.
+#   - a marca sai ANTES de decidir: chave que o bridge aprendeu desde o ultimo
+#     update volta sozinha para ativa no update seguinte.
+#   - chave do BLOCO GERENCIADO e descartada da cauda: o bloco vence e escreve de novo
+#     (nunca duplicar chave, que o bridge tambem recusa).
+#   - linha repetida, linha fora do formato e valor invalido tambem viram GUARDADO em
+#     vez de derrubar o update: preservar e sempre melhor que apagar ou abortar.
+#   - sem node ou sem lib/integracoes.cjs no stage, a lista fixa ainda vale como
+#     "aceita" e TODO o resto vai para GUARDADO. Nenhum caminho apaga linha do cliente.
+
+# Pergunta ao bridge do STAGE, chave por chave, se ele aceita. E o mesmo has() que o
+# boot usa, entao chave de conta declarada por FORMA (padroes[]) responde certo tambem.
+bridge_env_verdict() {
+  local lib="$1" perfil="$2" chaves="$3" saida="$4" obra js rc
+  [ -n "$NODE_BIN" ] || return 1
+  [ -f "$lib" ] || return 1
+  [ -s "$chaves" ] || return 1
+  # mktemp com sufixo depois dos X nao e portavel: diretorio proprio e o jeito seguro.
+  obra="$(mktemp -d "${TMPDIR:-/tmp}/leon-allow.XXXXXX")" || return 1
+  js="$obra/verdict.cjs"
+  cat > "$js" <<'JS'
+'use strict';
+const fs = require('fs');
+const [lib, perfil, entrada] = process.argv.slice(2);
+const integ = require(lib);
+const lista = perfil === 'dono' ? integ.manifestoAllowlist() : integ.allowlistCliente();
+if (!lista || typeof lista.has !== 'function' || !(lista.size > 0)) process.exit(1);
+const chaves = fs.readFileSync(entrada, 'utf8').split('\n').filter(Boolean);
+process.stdout.write(chaves.map((k) => (lista.has(k) ? '1 ' : '0 ') + k).join('\n') + '\n');
+JS
+  "$NODE_BIN" "$js" "$lib" "$perfil" "$chaves" > "$saida" 2>/dev/null
+  rc=$?
+  rm -rf -- "$obra"
+  [ "$rc" = 0 ] && [ -s "$saida" ]
+}
+
+# filter_user_env ORIGEM DESTINO [ARQUIVO_DE_NOMES_GERENCIADOS] [LIB_INTEGRACOES]
+# Deixa em DESTINO.guardadas os NOMES (nunca valores) do que ficou em quarentena.
+filter_user_env() {
+  local source="$1" destination="$2" managed="${3:-}" lib="${4:-}"
+  local obra perfil verdict
+  obra="$(mktemp -d "${TMPDIR:-/tmp}/leon-env.XXXXXX")" || return 1
+  "$PYTHON_BIN" - "$source" "$obra/chaves" "$obra/perfil" <<'PY' || { rm -rf -- "$obra"; return 1; }
+import re,sys
+source,saida_chaves,saida_perfil=sys.argv[1:]
+PRE=re.compile(r"^#LEON-GUARDADO (?:fora-da-allowlist|repetida|formato|valor|superada) ")
+RE=re.compile(r"\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*")
+cand=[PRE.sub("",l,count=1) for l in open(source,encoding="utf-8").read().splitlines()]
+chaves=[];vistas=set()
+for l in cand:
+    if not l.strip() or l.lstrip().startswith("#"): continue
+    m=RE.fullmatch(l)
+    if not m: continue
+    k=m.group(1)
+    if k not in vistas: vistas.add(k); chaves.append(k)
+open(saida_chaves,"w",encoding="utf-8").write("".join(k+"\n" for k in chaves))
+peek=re.compile(r"""^\s*LEON_ALLOWLIST_FULL\s*=\s*["']?1["']?\s*(?:#.*)?$""",re.M)
+open(saida_perfil,"w",encoding="utf-8").write(("dono" if peek.search("\n".join(cand)) else "cliente")+"\n")
+PY
+  perfil="$(cat "$obra/perfil" 2>/dev/null || echo cliente)"
+  verdict=""
+  if [ -n "$lib" ] && bridge_env_verdict "$lib" "$perfil" "$obra/chaves" "$obra/verdict"; then
+    verdict="$obra/verdict"
+  fi
+  "$PYTHON_BIN" - "$source" "$destination" "${managed:-}" "$verdict" <<'PY' || { rm -rf -- "$obra"; return 1; }
+import os,re,sys
+source,destination,managed_file,verdict_file=sys.argv[1:]
 allowed={
  "TELEGRAM_BOT_TOKEN","OWNER_CHAT_ID","GROUP_CHAT_ID","ALLOWED_SENDERS",
  "LEON_LICENSE_EMAIL","LEON_LICENSE_KEY","LEON_LICENSE_CENTRAL","LEON_MACHINE_ID","AGENT_NAME","AGENT_GENDER",
@@ -1227,31 +1449,92 @@ allowed={
  "MISSAO_STALL_MIN","MISSAO_MAX_RETRIES","MISSAO_RETAIN_DAYS",
  "MISSAO_GATE_MIN","TMP_RETENTION_MS","MEMVIVA_READ_MAX",
  "MEMVIVA_ROTATE_AT","ASSUNTOS_READ_MAX","HEARTBEAT_SEG","AVISO_PESADA_SEG","TZ",
+ # A2 (revisao Astra 17/09): a allowlist EFETIVA do bridge nao e so a da lib. O
+ # proprio bridge.cjs acrescenta chaves DEPOIS de montar a lista (bridge.cjs:98-99,
+ # ALLOWED_ENV_KEYS.add). Perguntar so a lib devolve uma lista MENOR que a do bridge
+ # que vai subir, e a chave valida do cliente virava comentario: com
+ # LEON_TURN_RETENTION_DAYS=365 guardada, o bridge assume 30 dias no boot seguinte e
+ # a limpeza come registro que o cliente mandou preservar. A allowlist efetiva aqui e
+ # UNIAO: resposta da lib + esta lista fixa + os nomes abaixo. Cinto pra casa que
+ # receber runtime cuja lib ainda nao conhece esses nomes; quando a lib passar a
+ # conhece-los, a uniao continua certa (nomes repetidos nao fazem mal).
+ "LEON_TURN_REGISTRY","LEON_TURN_RETENTION_DAYS",
  # DRAIN_SEG saiu da allowlist de user-env e virou chave GERENCIADA (11/09, cura dos 74
  # "adapter closed"): o updater re-grava DRAIN_SEG=300 no bloco comum abaixo, garantindo que
  # TODA casa (inclusive as ja vivas, que nunca tiveram a chave) drene ate 300s no restart do
  # /atualiza em vez dos 75s que matavam turno de missao longa no meio.
 }
-selected=[]; seen=set()
-for line in open(source,encoding="utf-8").read().splitlines():
-    if not line.strip() or line.lstrip().startswith("#"): continue
-    match=re.fullmatch(r"\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*",line)
-    if not match or match.group(1) in seen: raise SystemExit(1)
-    key,value=match.groups(); seen.add(key)
-    if key in allowed:
-        if any(ch in value for ch in "\r\n\x00") or len(value)>8192: raise SystemExit(1)
-        selected.append(f"{key}={value}\n")
+managed=set()
+if managed_file and os.path.exists(managed_file):
+    managed={l.strip() for l in open(managed_file,encoding="utf-8") if l.strip()}
+aceita=None
+if verdict_file and os.path.exists(verdict_file):
+    aceita=set()
+    for l in open(verdict_file,encoding="utf-8").read().splitlines():
+        if l[:2]=="1 ": aceita.add(l[2:])
+PRE=re.compile(r"^#LEON-GUARDADO (?:fora-da-allowlist|repetida|formato|valor|superada) ")
+RE=re.compile(r"\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*")
+bruto=open(source,encoding="utf-8").read().splitlines()
+cand=[PRE.sub("",l,count=1) for l in bruto]
+# A4 (revisao Astra 17/09): antes disto a marca de quarentena saia ANTES de escolher
+# a ultima ocorrencia, entao a linha GUARDADA disputava como candidata normal e vencia
+# por ser a de baixo: a credencial arquivada voltava a ativa e a que o cliente acabou
+# de corrigir virava "repetida". Agora quem era guardada anda marcada:
+#   ATIVA sempre vence. Guardada so volta a ativa quando a chave NAO tem nenhuma
+#   ativa (e o bridge aceita). Existindo as duas, a guardada continua guardada, com
+#   motivo 'superada'. Nunca duas ativas; nenhuma linha some.
+guardada=[PRE.match(l) is not None for l in bruto]
+ultimo_ativo={};ultimo_guardado={}
+for i,l in enumerate(cand):
+    if not l.strip() or l.lstrip().startswith("#"): continue
+    m=RE.fullmatch(l)
+    if not m: continue
+    (ultimo_guardado if guardada[i] else ultimo_ativo)[m.group(1)]=i
+selected=[];guardadas=[]
+def marca(motivo,linha,chave,i):
+    guardadas.append(motivo+" "+(chave or ("linha:"+str(i+1))))
+    return "#LEON-GUARDADO "+motivo+" "+linha
+for i,l in enumerate(cand):
+    if not l.strip() or l.lstrip().startswith("#"):
+        selected.append(l); continue
+    m=RE.fullmatch(l)
+    if not m:
+        selected.append(marca("formato",l,None,i)); continue
+    key,value=m.groups()
+    if key in managed: continue
+    if guardada[i]:
+        if key in ultimo_ativo:
+            selected.append(marca("superada",l,key,i)); continue
+        if ultimo_guardado.get(key)!=i:
+            selected.append(marca("repetida",l,key,i)); continue
+    elif ultimo_ativo.get(key)!=i:
+        selected.append(marca("repetida",l,key,i)); continue
+    if not (key in allowed or (aceita is not None and key in aceita)):
+        selected.append(marca("fora-da-allowlist",l,key,i)); continue
+    if any(ch in value for ch in "\r\n\x00") or len(value)>8192:
+        selected.append(marca("valor",l,key,i)); continue
+    selected.append(key+"="+value)
 temp=destination+".allow-new"
 fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
-try: os.write(fd,"".join(selected).encode()); os.fsync(fd)
+try: os.write(fd,"".join(l+"\n" for l in selected).encode()); os.fsync(fd)
 finally: os.close(fd)
 os.replace(temp,destination)
+rel=destination+".guardadas"
+tmp2=rel+".new"
+fd=os.open(tmp2,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
+try: os.write(fd,"".join(g+"\n" for g in guardadas).encode()); os.fsync(fd)
+finally: os.close(fd)
+os.replace(tmp2,rel)
 PY
+  rm -rf -- "$obra"
 }
 
 rewrite_runtime_env() {
-  local env_file="$1" temp
+  local env_file="$1" temp bloco cauda geridas
   temp="${env_file}.managed-new"
+  bloco="${env_file}.managed-bloco"
+  cauda="${env_file}.managed-cauda"
+  geridas="${env_file}.managed-nomes"
   # Preserva o modelo já validado no login (a prova pós-login testa em ordem
   # e grava o que respondeu): a conta ChatGPT do cliente pode não ter o "sol",
   # e o update não pode voltar pro default sobrescrevendo o que já funciona.
@@ -1267,11 +1550,15 @@ rewrite_runtime_env() {
     && printf '%s' "$existing_model" | grep -qE '^[A-Za-z0-9._-]+$'; then
     codex_model="$existing_model"
   fi
-  filter_user_env "$env_file" "$temp" || return 1
+  # O BLOCO GERENCIADO e montado ANTES da cauda para que os NOMES dele saiam do
+  # proprio bloco (nada de rol de nomes para alguem esquecer de atualizar) e a cauda
+  # possa descartar exatamente essas chaves. O bloco vence; a cauda nunca duplica.
+  : > "$bloco"
+  chmod 0600 "$bloco" 2>/dev/null || true
   # O MOTOR DA CASA e escolha do dono e o update nao a desfaz. Enquanto estas duas linhas
   # eram cravadas em "codex", um /atualiza numa casa do outro motor a devolvia calada pro
   # motor historico: o servico subia no motor errado sem ninguem pedir e sem nada avisar.
-  cat >> "$temp" <<EOF
+  cat >> "$bloco" <<EOF
 ENGINE=$LEON_ENGINE_CASA
 ENGINE_DEFAULT=$LEON_ENGINE_CASA
 LEON_DATA_DIR=$LEON_DATA_DIR
@@ -1302,7 +1589,7 @@ EOF
   # As chaves do CLI de cada motor entram so na casa que usa aquele CLI. Escrever as do
   # Codex numa casa do outro motor apontaria pra um binario que nao existe ali.
   if [ "$LEON_ENGINE_CASA" = codex ]; then
-    cat >> "$temp" <<EOF
+    cat >> "$bloco" <<EOF
 LEON_CODEX_ONLY=1
 CODEX_APP_SERVER=1
 CODEX_HOME=$CODEX_HOME_DIR
@@ -1312,12 +1599,23 @@ CODEX_REASONING_EFFORT=high
 LEON_CODEX_CLI_VERSION=$LEON_CODEX_CLI_VERSION
 EOF
   else
-    cat >> "$temp" <<EOF
+    cat >> "$bloco" <<EOF
 CLAUDE_CONFIG_DIR=$LEON_DATA_DIR/claude
 CODEX_MODEL=$codex_model
 CODEX_REASONING_EFFORT=high
 EOF
   fi
+  sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$bloco" | sort -u > "$geridas" \
+    || { rm -f -- "$bloco" "$geridas"; return 1; }
+  filter_user_env "$env_file" "$cauda" "$geridas" "${STAGE:-}/lib/integracoes.cjs" \
+    || { rm -f -- "$bloco" "$cauda" "$geridas"; return 1; }
+  cat -- "$cauda" "$bloco" > "$temp" \
+    || { rm -f -- "$bloco" "$cauda" "$geridas" "$temp"; return 1; }
+  # NOMES do que ficou guardado vao para o log da casa; VALOR nunca sai daqui.
+  if [ -s "$cauda.guardadas" ]; then
+    say "   .env: $(wc -l < "$cauda.guardadas" | tr -d ' ') linha(s) que este bridge nao aceita ficaram GUARDADAS no proprio .env (#LEON-GUARDADO); nada foi apagado: $(tr '\n' ' ' < "$cauda.guardadas")"
+  fi
+  rm -f -- "$bloco" "$cauda" "$cauda.guardadas" "$geridas"
   chmod 0600 "$temp"
   mv -f -- "$temp" "$env_file"
 }
@@ -1690,6 +1988,14 @@ PY
 if [ "${LEON_TEST_SKILLS_HELPERS_ONLY:-0}" = "1" ]; then
   case "${1:-}" in
     personal-dir)       skills_personal_dir ;;
+    # 17/09: as duas decisoes novas da migracao do ledger expostas cruas pra
+    # bancada provar a MESMA funcao que o /atualiza chama, sem release assinada.
+    ledger-familia)     familia_do_bridge "$2" ;;
+    ledger-salas)       ledger_salas_de "$2" ;;
+    # 17/09 (revisao Astra, A3): o predicado de LEON_SESSIONS_FILE e o guarda-chave
+    # expostos crus, pra bancada provar a MESMA funcao que o /atualiza chama.
+    ledger-sessoes)     ledger_sessions_file_honrado "$2" "$3" ;;
+    env-guarda)         env_guarda_chave "$2" "$3" "$4" ;;
     personal-ensure)    ensure_skills_personal_dir ;;
     personal-ready)     skills_personal_dir_ready ;;
     backup-remove)      remove_committed_skills_backup "$2" "$3" ;;
@@ -1709,7 +2015,7 @@ if [ "${LEON_TEST_SKILLS_HELPERS_ONLY:-0}" = "1" ]; then
       if [ -e "$_cr_dir" ]; then mv -- "$_cr_dir" "$_cr_failed" || exit 1; fi
       mv -- "$_cr_backup" "$_cr_dir" || exit 1
       ;;
-    env-filter)         filter_user_env "$2" "$3" ;;
+    env-filter)         filter_user_env "$2" "$3" "${4:-}" "${5:-}" ;;
     *) exit 64 ;;
   esac
   exit $?
@@ -1902,6 +2208,39 @@ health_smoke() {
         || { health_motivo "$tx" "sem heartbeat (.alive) ate ${alive_wait}s depois do restart: unit ativa mas o bridge nao voltou a atender"; return 1; }
       ;;
   esac
+  # ---- CONFERENCIA DO LEDGER DE SALAS (17/09) -------------------------------
+  # Depois do heartbeat: o runtime NOVO ja esta de pe e ja leu o ledger. Toda
+  # chave de SALA registrada no commit tem de existir no arquivo que o runtime
+  # ENTRANTE esta lendo. Sala a menos = motivo nomeado + return 1, e o finalizador
+  # chama rollback_transaction: o bridge anterior sobe lendo BACKUP/sessions.json
+  # e a casa volta inteira.
+  # POR QUE ISTO E A REDE: se a copia cair num caminho diferente do que o bridge
+  # resolve (unit ganhando Environment, LEON_SESSIONS_FILE vazando), o bridge
+  # boota VAZIO com log verde. Conferir por chave de sala, nunca por contagem
+  # total: as duas familias podam no boot as entradas de missao/promessa mortas.
+  if [ -f "$tx/ledger-salas-esperadas" ]; then
+    local ledger_vivo ledger_esperadas ledger_vivas ledger_faltando
+    ledger_esperadas="$(wc -l < "$tx/ledger-salas-esperadas" | tr -d ' ')"
+    case "$ledger_esperadas" in ''|*[!0-9]*) ledger_esperadas=0 ;; esac
+    if [ "$ledger_esperadas" -gt 0 ]; then
+      ledger_vivo="$(cat "$tx/ledger-vivo" 2>/dev/null || true)"
+      if [ -z "$ledger_vivo" ] || [ ! -f "$ledger_vivo" ]; then
+        health_motivo "$tx" "ledger perdeu $ledger_esperadas salas (o arquivo de conversas do runtime novo nao existe)"
+        return 1
+      fi
+      if ! ledger_salas_de "$ledger_vivo" > "$tx/ledger-salas-vivas" 2>/dev/null; then
+        health_motivo "$tx" "ledger ilegivel depois do restart (esperadas $ledger_esperadas salas)"
+        return 1
+      fi
+      ledger_vivas="$(wc -l < "$tx/ledger-salas-vivas" | tr -d ' ')"
+      ledger_faltando="$(LC_ALL=C comm -23 "$tx/ledger-salas-esperadas" "$tx/ledger-salas-vivas" | wc -l | tr -d ' ')"
+      case "$ledger_faltando" in ''|*[!0-9]*) ledger_faltando=0 ;; esac
+      if [ "$ledger_faltando" -gt 0 ]; then
+        health_motivo "$tx" "ledger perdeu $ledger_faltando salas (esperadas $ledger_esperadas, vivas $ledger_vivas)"
+        return 1
+      fi
+    fi
+  fi
   telegram_smoke "$live" || { health_motivo "$tx" "smoke do Telegram falhou"; return 1; }
 }
 
@@ -1985,6 +2324,101 @@ commit_lock_release_after_restart() {
   COMMIT_LOCK=""
 }
 
+# ---- A1: A COPIA DO LEDGER TEM DE ACONTECER COM O SERVICO PARADO (17/09) ----
+# ACHADO (revisao Astra): a copia do ledger roda logo depois dos dois renames, com o
+# bridge LEGADO ainda atendendo, e o servico so reinicia dezenas de linhas depois
+# (npm install de ate 120s, modelo de audio de ate 600s, banco, cron). Tudo que o
+# cliente conversar nessa janela e gravado pelo bridge legado no caminho literal
+# INSTALL_DIR/sessions.json, que ninguem le depois: o runtime novo sobe com a foto
+# velha e a conferencia passa, porque a lista esperada tambem veio da foto velha.
+# REGRA NOVA: a copia que VALE, e a lista de salas que a saude cobra, sao refeitas
+# com o servico PARADO, imediatamente antes de subir o runtime novo. A copia de
+# antes do commit continua onde esta (e ela que prova, com a casa intacta, que o
+# arquivo passa no pre-voo e que o destino esta limpo); esta segunda e o re-sync.
+# NUNCA MOVE: a origem segue intocada e viaja dentro do BACKUP, entao os tres
+# caminhos de volta continuam devolvendo a casa com as salas.
+#
+# POR QUE NEM SEMPRE DA PRA PARAR: quando o /atualiza dispara pelo proprio LEON, este
+# script nasce dentro do cgroup da unit (KillMode=control-group), e um 'stop' mataria
+# o atualizador ANTES do start, deixando a casa parada. Nesse caso o re-sync sai a
+# quente, na ultima linha antes do restart: a janela cai de minutos para o tempo de
+# uma copia. Sem /proc legivel respondemos "estamos dentro" (modo quente = o
+# comportamento de hoje): endurecer nunca pode virar motivo novo de casa parada.
+dentro_do_cgroup_do_servico() {
+  [ -r /proc/self/cgroup ] || return 0
+  grep -qF "$SERVICE" /proc/self/cgroup 2>/dev/null
+}
+
+ledger_espera_parado() {
+  local i=0 teto
+  teto="${LEON_STOP_ATTEMPTS:-30}"
+  while [ "$i" -lt "$teto" ]; do
+    if ! service_read is-active "$SERVICE" >/dev/null 2>&1 && ! service_in_transition; then
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  return 1
+}
+
+# Grava o que a prova de saude cobra: o caminho vivo, as CHAVES DE SALA esperadas, o
+# sha e a contagem. Sempre a partir do arquivo que esta no disco AGORA, para que a
+# lista nunca seja mais velha que a copia.
+ledger_registra_saude() {
+  printf '%s\n' "$LEDGER_DESTINO" > "$TX_DIR/ledger-vivo"
+  if [ -f "$LEDGER_DESTINO" ]; then
+    ledger_salas_de "$LEDGER_DESTINO" > "$TX_DIR/ledger-salas-esperadas" || return 1
+    sha256sum "$LEDGER_DESTINO" | awk '{print $1}' > "$TX_DIR/ledger-sha"
+  else
+    : > "$TX_DIR/ledger-salas-esperadas"
+    : > "$TX_DIR/ledger-sha"
+  fi
+  wc -l < "$TX_DIR/ledger-salas-esperadas" | tr -d ' ' > "$TX_DIR/ledger-salas"
+  if [ "${LEDGER_COPIOU:-0}" = 1 ] && [ -n "${LEDGER_MARCA:-}" ]; then
+    printf '%s\n' "$LEDGER_MARCA" > "$TX_DIR/ledger-marca"
+    ( umask 077
+      printf 'tx=%s\norigem=%s\ndestino=%s\nsalas=%s\n' \
+        "$TX_ID" \
+        "$(sha256sum "$INSTALL_DIR/sessions.json" | awk '{print $1}')" \
+        "$(cat "$TX_DIR/ledger-sha")" \
+        "$(cat "$TX_DIR/ledger-salas")" > "$LEDGER_MARCA" ) || return 1
+  fi
+}
+
+# Re-sync: a MESMA copia validada de antes, refeita sobre o arquivo mais fresco, mais
+# o pre-voo e as listas da saude. $1 = parado | quente (so para o rastro no tx).
+ledger_resync() {
+  local modo="$1"
+  [ "${LEDGER_MIGRA:-0}" = 1 ] || return 0
+  printf '%s\n' "$modo" > "$TX_DIR/ledger-resync" 2>/dev/null || true
+  [ -e "$INSTALL_DIR/sessions.json" ] || return 0
+  safe_copy_state_file "$INSTALL_DIR/sessions.json" "$LEDGER_DESTINO" sessions || return 1
+  if [ "$(id -u)" = 0 ]; then chown --reference="$INSTALL_DIR" -- "$LEDGER_DESTINO" 2>/dev/null || true; fi
+  ledger_pre_voo "$LEDGER_DESTINO" || return 1
+  LEDGER_COPIOU=1
+  printf 'migrado\n' > "$TX_DIR/ledger-modo"
+  ledger_registra_saude || return 1
+}
+
+# Poe o runtime novo no ar. 0 = servico de pe; diferente de 0 = quem chama restaura.
+subir_runtime_novo() {
+  if [ "${LEDGER_MIGRA:-0}" = 1 ] && ! dentro_do_cgroup_do_servico; then
+    if service_write stop "$SERVICE" && ledger_espera_parado; then
+      say "   serviço parado; levando as conversas para o runtime novo antes de subir."
+      ledger_resync parado || return 2
+      date +%s > "$TX_DIR/restart-at" 2>/dev/null || true
+      service_write start "$SERVICE" || return 1
+      return 0
+    fi
+    say "   não consegui parar o serviço para copiar as conversas; sigo pelo reinício."
+  fi
+  ledger_resync quente || return 2
+  date +%s > "$TX_DIR/restart-at" 2>/dev/null || true
+  service_write restart "$SERVICE" || return 1
+  return 0
+}
+
 finalize_lock_age() {  # idade em segundos do dir de trava (vazio = nao existe)
   local dir="$1" mtime now
   mtime="$(stat -c %Y -- "$dir" 2>/dev/null || true)"
@@ -2013,7 +2447,7 @@ finalize_lock_release() {
 }
 
 finalize_transaction() {
-  local tx="$1" marker live lock_dir thread chat tx_service skills_backup skills_path
+  local tx="$1" marker live lock_dir thread chat tx_service skills_backup skills_path ledger_marca
   case "$tx" in /*/update-transactions/*) ;; *) return 1 ;; esac
   [ -d "$tx" ] && [ ! -L "$tx" ] || return 1
   tx_service="$(tx_read "$tx" service-name)"
@@ -2056,13 +2490,23 @@ finalize_transaction() {
       printf '%s [skills] catalogo anterior mantido em quarentena (%s): casa ainda sem skills-pessoais.\n' \
         "$(date '+%F %T')" "$skills_backup" >> "$live/upgrade.log" 2>/dev/null || true
     fi
+    # 17/09: a copia em LEON_STATE_DIR virou o ledger VIVO. O marcador sai (ele so
+    # autoriza sobrescrever copia NAO promovida). A origem em INSTALL_DIR fica como
+    # fossil sem leitor: apagar dado do dono e proibido.
+    ledger_marca="$(cat "$tx/ledger-marca" 2>/dev/null || true)"
+    [ -z "$ledger_marca" ] || rm -f -- "$ledger_marca" 2>/dev/null || true
+    printf '%s [ledger] %s: %s salas em %s (sha %s)\n' "$(date '+%F %T')" \
+      "$(cat "$tx/ledger-modo" 2>/dev/null || echo conferido)" \
+      "$(cat "$tx/ledger-salas" 2>/dev/null || echo 0)" \
+      "$(cat "$tx/ledger-vivo" 2>/dev/null || true)" \
+      "$(cat "$tx/ledger-sha" 2>/dev/null || true)" >> "$live/upgrade.log" 2>/dev/null || true
     printf 'succeeded\n' > "$tx/status"
     remove_finalize_cron "$marker"
     rm -f -- "$live/.update-pending.json" 2>/dev/null || true
     # Report HONESTO: a versao NOVA so agora, depois de passar na prova de saude.
     report_version_from_tx "$tx" new-version
     # F1.5: rastro do ciclo bem-sucedido na central (sinal da frota).
-    report_diagnostico_from_tx "$tx" ok "atualizou e passou na prova de saude"
+    report_diagnostico_from_tx "$tx" ok "atualizou e passou na prova de saude; ledger $(cat "$tx/ledger-modo" 2>/dev/null || echo conferido) $(cat "$tx/ledger-salas" 2>/dev/null || echo 0) salas"
     # SEM msg de sucesso aqui: quem confirma "✅ No ar!" pro dono e o BRIDGE ao subir
     # (bridge.cjs, veioDeUpdate). Emitir aqui TAMBEM gerava mensagem DUPLICADA no Telegram
     # ("Atualizacao concluida" + "No ar!"). A saudacao do bridge e a fonte unica, e ela so
@@ -2811,6 +3255,12 @@ grep -q 'const LEON_CODEX_ONLY = true' "$STAGE/bridge.cjs" \
 bash -n "$STAGE/update-pago.sh" || fatal "o atualizador preparado falhou no último teste de sintaxe."
 BRIDGE_SHA="$(sha256sum "$STAGE/bridge.cjs" | awk '{print $1}')"
 printf '%s\n' "$BRIDGE_SHA" > "$TX_DIR/bridge-sha256"
+# 17/09: familia do runtime ENTRANTE. Aqui e o primeiro ponto seguro: o stage ja
+# passou por node --check e pelo BRIDGE_SHA acima (codigo assinado, extraido e
+# conferido) e nada da casa viva foi mutado ainda. O sinal e o codigo, nao a
+# versao: os bundles publicados hoje sao todos da familia LEGADA.
+LEDGER_FAMILIA_ENTRANTE="$(familia_do_bridge "$STAGE/bridge.cjs")"
+printf '%s\n' "$LEDGER_FAMILIA_ENTRANTE" > "$TX_DIR/ledger-familia-entrante"
 
 # O modelo e a sessão persistente são provados no stage, com cópia efêmera e
 # segura da autenticação. Falha de acesso ao modelo nunca cai para outro modelo.
@@ -2944,6 +3394,116 @@ fi
 rewrite_runtime_env "$STAGE/.env" \
   || fatal "o .env atual não pôde ser reduzido à configuração suportada; runtime preservado."
 
+# ---- LEDGER DE SALAS: FAMILIA INSTALADA E PRE-CHECAGENS (17/09) ------------
+# POR QUE EXATAMENTE AQUI: e o ultimo ponto com a casa INTACTA (MUTATION_STARTED
+# liga logo abaixo). Toda recusa daqui preserva o runtime, sem rollback e sem
+# restart. O bridge INSTALADO tem de ser lido agora porque depois dos renames ele
+# passa a morar em $BACKUP/bridge.cjs.
+# FATO MEDIDO 17/09: o bridge.cjs das casas de cliente tem ZERO ocorrencias de
+# _resolveSessionsFile e le as salas em INSTALL_DIR/sessions.json; o runtime novo
+# le em LEON_STATE_DIR/sessions.json. Sem a copia abaixo, a casa acorda com todas
+# as salas vazias.
+# REGRA DE OURO: COPIA, nunca move. INSTALL_DIR/sessions.json nunca e escrito,
+# movido nem apagado por este script; ele viaja dentro do BACKUP pelo rename que
+# ja existe, e por isso rollback_inline, rollback_transaction e cleanup_main
+# devolvem a casa com as salas sem uma linha de codigo nova. Nao existe desfazer.
+LEDGER_FAMILIA_INSTALADA="$(familia_do_bridge "$INSTALL_DIR/bridge.cjs")"
+printf '%s\n' "$LEDGER_FAMILIA_INSTALADA" > "$TX_DIR/ledger-familia-instalada"
+LEDGER_MIGRA=0
+LEDGER_STATE_DIR=""
+LEDGER_DESTINO=""
+LEDGER_MARCA=""
+LEDGER_COPIOU=0
+LEDGER_SESSOES_DECLARADO=""
+if [ "$LEDGER_FAMILIA_INSTALADA" = indeterminada ] || [ "$LEDGER_FAMILIA_ENTRANTE" = indeterminada ]; then
+  report_diagnostico_from_tx "$TX_DIR" erro \
+    "familia do runtime indeterminada (instalada=$LEDGER_FAMILIA_INSTALADA, entrante=$LEDGER_FAMILIA_ENTRANTE); nada trocado" || true
+  fatal "não consegui identificar com segurança onde cada runtime guarda as conversas (instalada=$LEDGER_FAMILIA_INSTALADA, entrante=$LEDGER_FAMILIA_ENTRANTE); runtime preservado."
+fi
+# Onde o runtime ENTRANTE vai LER o ledger depois do commit.
+if [ "$LEDGER_FAMILIA_ENTRANTE" = nova ]; then
+  # Destino LIDO do .env do stage, NUNCA recalculado: e exatamente a variavel que
+  # o bridge novo resolve. filter_user_env descarta LEON_STATE_DIR, LEON_DATA_DIR
+  # e LEON_SESSIONS_FILE vindos do dono, o bloco gerenciado grava a nossa e a unit
+  # nao tem EnvironmentFile. Sem override de operador: na casa do cliente nao ha
+  # operador pra corrigir um palpite errado.
+  LEDGER_STATE_DIR="$(safe_env_value "$STAGE/.env" LEON_STATE_DIR 2>/dev/null || true)"
+  case "$LEDGER_STATE_DIR" in
+    /*) ;;
+    *) fatal "a configuração preparada não declara um caminho absoluto de estado (LEON_STATE_DIR); runtime preservado." ;;
+  esac
+  # A3 (revisao Astra 17/09): LEON_SESSIONS_FILE esta no NUCLEO da lib, entao a chave
+  # do cliente SOBREVIVE ao filtro e chegava aqui, onde a simples presenca abortava.
+  # Resultado: a casa que declarou o caminho (ate o proprio padrao) nunca mais
+  # atualizava, de hora em hora, para sempre. Nao existe operador nessa casa pra
+  # desfazer o palpite, entao a regra e: LER o valor, nunca abortar por presenca.
+  LEDGER_SESSOES_DECLARADO="$(safe_env_value "$STAGE/.env" LEON_SESSIONS_FILE 2>/dev/null || true)"
+  if [ -n "$LEDGER_SESSOES_DECLARADO" ]; then
+    if ledger_sessions_file_honrado "$LEDGER_SESSOES_DECLARADO" "$LEDGER_STATE_DIR"; then
+      # O runtime novo honra este caminho: ele VIRA o destino do ledger e a chave
+      # continua ativa no .env do cliente.
+      LEDGER_DESTINO="$LEDGER_SESSOES_DECLARADO"
+      say "   conversas: o runtime novo vai ler o arquivo que o teu .env declara ($LEDGER_DESTINO)."
+    else
+      # O runtime novo recusaria este caminho no boot (exit 78) e a casa nao subiria.
+      # Guardo a linha com o valor intacto e sigo pelo padrao, sem abortar.
+      env_guarda_chave "$STAGE/.env" LEON_SESSIONS_FILE migrado \
+        || fatal "não consegui guardar com segurança a linha que redireciona o arquivo de conversas; runtime preservado."
+      LEDGER_DESTINO="$LEDGER_STATE_DIR/sessions.json"
+      say "   conversas: o caminho declarado no teu .env ($LEDGER_SESSOES_DECLARADO) não cabe onde o runtime novo lê; guardei a linha (nada foi apagado) e sigo por $LEDGER_DESTINO."
+    fi
+  else
+    LEDGER_DESTINO="$LEDGER_STATE_DIR/sessions.json"
+  fi
+else
+  LEDGER_DESTINO="$INSTALL_DIR/sessions.json"
+fi
+# Migra SO no unico sentido que perde sala: legado (le no INSTALL_DIR) -> novo
+# (le no LEON_STATE_DIR). Casa que ja e da familia nova nunca tem o destino
+# sobrescrito, nem com LEON_FORCE.
+if [ "$LEDGER_FAMILIA_INSTALADA" = legada ] && [ "$LEDGER_FAMILIA_ENTRANTE" = nova ]; then
+  LEDGER_MIGRA=1
+fi
+if [ "$LEDGER_MIGRA" = 1 ]; then
+  LEDGER_MARCA="$LEDGER_STATE_DIR/.sessions.json.migrado"
+  ledger_prepara_destino "$LEDGER_STATE_DIR" "$INSTALL_DIR" \
+    || fatal "a pasta de estado do runtime novo não passou na checagem de segurança; runtime preservado."
+  if [ -e "$INSTALL_DIR/sessions.json" ]; then
+    safe_copy_state_file "$INSTALL_DIR/sessions.json" "$TX_DIR/ledger-origem-previa.json" sessions \
+      || fatal "o arquivo de conversas atual não passou na validação; não troquei nada."
+    ledger_salas_de "$TX_DIR/ledger-origem-previa.json" > "$TX_DIR/ledger-origem-salas" \
+      || fatal "não consegui ler as conversas do arquivo atual; não troquei nada."
+  else
+    # Casa que nunca conversou: migracao vazia, e correto e boot vazio.
+    : > "$TX_DIR/ledger-origem-salas"
+  fi
+  # Destino JA EXISTENTE: so pode ser orfao de uma tentativa que voltou atras,
+  # porque o bridge legado instalado nao le esse caminho. O orfao e resolvido na
+  # tentativa SEGUINTE, nunca na volta.
+  if [ -e "$LEDGER_DESTINO" ]; then
+    { [ -f "$LEDGER_DESTINO" ] && [ ! -L "$LEDGER_DESTINO" ]; } \
+      || fatal "existe algo no lugar do arquivo de conversas do runtime novo e não é um arquivo comum; não troquei nada."
+    LEDGER_DEST_SHA="$(sha256sum "$LEDGER_DESTINO" | awk '{print $1}')"
+    LEDGER_MARCA_SHA="$(sed -n 's/^destino=//p' "$LEDGER_MARCA" 2>/dev/null | tail -1 || true)"
+    if [ -n "$LEDGER_MARCA_SHA" ] && [ "$LEDGER_MARCA_SHA" = "$LEDGER_DEST_SHA" ]; then
+      # Copia NOSSA, nao promovida: ninguem a leu (o bridge instalado e legado).
+      # Sobrescreve a partir da origem fresca, guardando o anterior no tx.
+      :
+    else
+      safe_copy_state_file "$LEDGER_DESTINO" "$TX_DIR/ledger-destino-previa.json" sessions \
+        || fatal "já existe um arquivo de conversas no lugar do runtime novo e ele não é legível com segurança; não troquei nada."
+      ledger_salas_de "$TX_DIR/ledger-destino-previa.json" > "$TX_DIR/ledger-destino-salas" \
+        || fatal "já existe um arquivo de conversas no lugar do runtime novo e não consegui lê-lo; não troquei nada."
+      if [ -n "$(LC_ALL=C comm -23 "$TX_DIR/ledger-destino-salas" "$TX_DIR/ledger-origem-salas")" ]; then
+        # Mesclar inventaria conteudo; recusar nao perde nada e aparece na central.
+        report_diagnostico_from_tx "$TX_DIR" erro "ledger duplo com sala so no destino; nada trocado" || true
+        fatal "encontrei dois arquivos de conversas e o do runtime novo tem conversa que o atual não tem; não troquei nada."
+      fi
+    fi
+    cp -p -- "$LEDGER_DESTINO" "$TX_DIR/ledger-destino-anterior.json" 2>/dev/null || true
+  fi
+fi
+
 MUTATION_STARTED=1
 if [ -e "$LEON_SKILLS_DIR" ]; then
   if [ ! -d "$LEON_SKILLS_DIR" ] || [ -L "$LEON_SKILLS_DIR" ]; then
@@ -2985,6 +3545,47 @@ if [ "${LEON_TEST_FAIL_AT:-}" = "between_renames" ]; then
   fatal "falha injetada entre os renames."
 fi
 mv -- "$STAGE" "$INSTALL_DIR"
+
+# ---- LEDGER DE SALAS: A COPIA (17/09) --------------------------------------
+# POSICAO: DEPOIS do segundo rename e ANTES do 'committed'. A fonte e o
+# $INSTALL_DIR/sessions.json JA renomeado, o arquivo mais FRESCO que existe: o
+# bridge legado continua vivo e grava pelo caminho literal, que depois do rename
+# aponta pra copia que veio do stage; BACKUP/sessions.json congelou no primeiro
+# rename. Falha em qualquer linha daqui e fatal -> cleanup_main -> rollback_inline
+# desfaz os dois renames; nenhum restart aconteceu e a casa volta byte a byte.
+# NAO EXISTE DESFAZER: a origem nunca e tocada e viaja dentro do BACKUP, entao os
+# tres caminhos de volta ja devolvem as salas. Desfazer no meio da restauracao foi
+# o furo pego em 16/09 (casa restaurada SEM ledger e com log verde), e aqui so
+# adicionaria escrita em tres caminhos de rollback sem proteger nada.
+if [ "$LEDGER_MIGRA" = 1 ] && [ -e "$INSTALL_DIR/sessions.json" ]; then
+  safe_copy_state_file "$INSTALL_DIR/sessions.json" "$LEDGER_DESTINO" sessions \
+    || fatal "não consegui levar as conversas para onde o runtime novo lê; runtime preservado."
+  # Bancada rodando como root: o arquivo nasce do euid do processo, e o bridge
+  # (que sobe como o usuario da unit) recusaria com exit 78. Na casa de cliente o
+  # atualizador ja roda como o dono e isto nao faz nada.
+  if [ "$(id -u)" = 0 ]; then chown --reference="$INSTALL_DIR" -- "$LEDGER_DESTINO" 2>/dev/null || true; fi
+  ledger_pre_voo "$LEDGER_DESTINO" \
+    || fatal "as conversas copiadas não passaram na checagem que o runtime novo faz ao subir; runtime preservado."
+  LEDGER_COPIOU=1
+fi
+# A conferencia vale pra TODA atualizacao, inclusive quando nada foi copiado
+# (legado->legado, novo->novo). Assim ela se prova na bancada hoje, antes do
+# primeiro bundle da familia nova existir.
+# O marcador da migracao fica FORA do backup selado e SEM poder de desfazer coisa
+# alguma: ele so autoriza SOBRESCREVER, numa tentativa seguinte, uma copia nossa que
+# nunca foi promovida, e so em casa cujo bridge instalado e legado (onde o destino nao
+# tem leitor). Esta amarrado ao sha do proprio arquivo, entao forja-lo so consegue
+# sobrescrever um arquivo que ninguem le, e o anterior fica guardado no tx.
+# As listas gravadas aqui sao PROVISORIAS quando ha migracao: o re-sync com o servico
+# parado (subir_runtime_novo) as regrava a partir da copia final, e e essa que a prova
+# de saude cobra. Sem migracao, esta e a unica e a definitiva.
+ledger_registra_saude \
+  || fatal "não consegui listar as conversas que o runtime novo precisa enxergar; runtime preservado."
+if [ "$LEDGER_COPIOU" = 1 ]; then printf 'migrado\n' > "$TX_DIR/ledger-modo"
+else printf 'conferido\n' > "$TX_DIR/ledger-modo"; fi
+if [ "${LEON_TEST_FAIL_AT:-}" = "after_ledger" ]; then
+  fatal "falha injetada depois da migração do ledger."
+fi
 # TRAVA ANTES DO 'committed': o cron do finalizador dispara a cada minuto e, sem
 # isso, media a saude no meio do nosso proprio restart (pid velho x pid novo) e
 # revertia release boa. Segura ate o servico assentar; COMMIT_LOCK != "" faz o
@@ -3096,8 +3697,11 @@ say "commit atomico concluido; reiniciando $SERVICE"
 # antigo passaria por prova. O tx e o canal certo porque o restart mata este
 # script junto, e quem confere depois e o finalizador no cron.
 if [ "$TEST_MODE" = "1" ]; then
-  date +%s > "$TX_DIR/restart-at" 2>/dev/null || true
-  service_write restart "$SERVICE"
+  if ! subir_runtime_novo; then
+    finalize_lock_release "$COMMIT_LOCK"; COMMIT_LOCK=""
+    rollback_transaction "$TX_DIR" || true
+    fatal "o serviço não voltou com o runtime novo; a versão anterior foi restaurada."
+  fi
   MUTATION_STARTED=0
   # Solta a trava so DEPOIS do restart: o finalizador daqui roda inline, mas o cron
   # do minuto tambem pode estar batendo na porta.
@@ -3112,14 +3716,16 @@ fi
 # finalizador ja esta no cron e assume a prova de estabilidade ou o rollback.
 RESTARTING=1
 set +e
-date +%s > "$TX_DIR/restart-at" 2>/dev/null || true
-service_write restart "$SERVICE"
+subir_runtime_novo
 RESTART_STATUS=$?
 set -e
 if [ "$RESTART_STATUS" -ne 0 ]; then
   RESTARTING=0
   finalize_lock_release "$COMMIT_LOCK"; COMMIT_LOCK=""
   rollback_transaction "$TX_DIR" || true
+  if [ "$RESTART_STATUS" -eq 2 ]; then
+    fatal "não consegui levar as conversas para o runtime novo na hora de subir; a versão anterior foi restaurada."
+  fi
   fatal "o serviço recusou o reinício; a versão anterior foi restaurada."
 fi
 # O restart deu certo. Se este processo sobreviveu a ele, espera o pid novo assentar

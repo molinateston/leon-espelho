@@ -1399,14 +1399,22 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
   # cron: o agente instala sozinho as rotinas de backup, saude, a rede de
   # seguranca do update e o vigia do /atualiza. Sem cron, nada disso existe.
   # python3-venv/pip e ffmpeg: voz e transcricao sao obrigatorias (A3).
+  # SEGUNDA TENTATIVA (cliente 18/09): Debian 11 com espelho de security desatualizado
+  # devolveu 404 num .deb; um apt-get update novo + --fix-missing resolveu na hora.
   echo ">> instalando pacotes do sistema (git, curl, python3, ffmpeg, cron...)..."
-  "${APT_INSTALL[@]}" \
-    git curl ca-certificates tar cron \
-    python3 python3-venv python3-pip ffmpeg \
-    dbus-user-session locales sudo >/dev/null 2>/tmp/apt-base.err \
-    || { echo "ERRO: pacotes base do sistema nao instalaram." >&2
-         [ -s /tmp/apt-base.err ] && echo "detalhe apt: $(tail -n 3 /tmp/apt-base.err)" >&2
-         echo "abortando. suporte: https://wa.me/5511988890934" >&2; exit 1; }
+  PACOTES_BASE=(
+    git curl ca-certificates tar cron
+    python3 python3-venv python3-pip ffmpeg
+    dbus-user-session locales sudo
+  )
+  if ! "${APT_INSTALL[@]}" "${PACOTES_BASE[@]}" >/dev/null 2>/tmp/apt-base.err; then
+    echo "   (aviso) pacotes nao vieram na primeira tentativa; atualizo o indice e tento de novo..."
+    apt-get update -qq >/dev/null 2>>/tmp/apt-base.err || true
+    "${APT_INSTALL[@]}" --fix-missing "${PACOTES_BASE[@]}" >/dev/null 2>>/tmp/apt-base.err \
+      || { echo "ERRO: pacotes base do sistema nao instalaram." >&2
+           [ -s /tmp/apt-base.err ] && echo "detalhe apt: $(tail -n 3 /tmp/apt-base.err)" >&2
+           echo "abortando. suporte: https://wa.me/5511988890934" >&2; exit 1; }
+  fi
   # CRON ROBUSTO (fix bug-de-nascenca 01/09): o `|| true` cego deixava a casa nascer
   # com o cron MORTO sem ninguem saber — e o /atualiza (que roda pelo cron) travava
   # eterno. Agora liga de verdade, desmascara, e CONFERE. O motor reserva (leon-vigia.timer,
