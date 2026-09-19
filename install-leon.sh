@@ -1410,10 +1410,29 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
   if ! "${APT_INSTALL[@]}" "${PACOTES_BASE[@]}" >/dev/null 2>/tmp/apt-base.err; then
     echo "   (aviso) pacotes nao vieram na primeira tentativa; atualizo o indice e tento de novo..."
     apt-get update -qq >/dev/null 2>>/tmp/apt-base.err || true
-    "${APT_INSTALL[@]}" --fix-missing "${PACOTES_BASE[@]}" >/dev/null 2>>/tmp/apt-base.err \
-      || { echo "ERRO: pacotes base do sistema nao instalaram." >&2
-           [ -s /tmp/apt-base.err ] && echo "detalhe apt: $(tail -n 3 /tmp/apt-base.err)" >&2
-           echo "abortando. suporte: https://wa.me/5511988890934" >&2; exit 1; }
+    if ! "${APT_INSTALL[@]}" --fix-missing "${PACOTES_BASE[@]}" >/dev/null 2>>/tmp/apt-base.err; then
+      # TERCEIRA TENTATIVA (dois clientes 19/09): Debian 11 saiu de suporte; o apt recusa
+      # renovar o indice de repositorio vencido ("Release file ... is expired") e continua
+      # pedindo .deb que o espelho de security ja apagou (404). Duas coisas resolvem:
+      # aceitar o Release vencido e, se o security.debian.org devolve 404, apontar pro
+      # archive.debian.org (onde a Debian guarda as versoes antigas). So mexe em fontes
+      # que citam security.debian.org, com backup ao lado.
+      echo "   (aviso) segunda tentativa tambem falhou; tratando repositorio vencido (Debian antigo)..."
+      if grep -qE "security\.debian\.org.*404|404.*security\.debian\.org|is expired|Release file" /tmp/apt-base.err 2>/dev/null; then
+        for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+          [ -f "$f" ] || continue
+          if grep -qE "^[^#]*security\.debian\.org" "$f"; then
+            cp -p "$f" "$f.leon-bak-$(date -u +%Y%m%dT%H%M%SZ)"
+            sed -i -E 's#https?://security\.debian\.org/?#http://archive.debian.org/#; s#archive\.debian\.org/debian-security#archive.debian.org/debian-security#' "$f"
+          fi
+        done
+      fi
+      apt-get update -o Acquire::Check-Valid-Until=false --allow-releaseinfo-change >/dev/null 2>>/tmp/apt-base.err || true
+      "${APT_INSTALL[@]}" -o Acquire::Check-Valid-Until=false --fix-missing "${PACOTES_BASE[@]}" >/dev/null 2>>/tmp/apt-base.err \
+        || { echo "ERRO: pacotes base do sistema nao instalaram." >&2
+             [ -s /tmp/apt-base.err ] && echo "detalhe apt: $(tail -n 3 /tmp/apt-base.err)" >&2
+             echo "abortando. suporte: https://wa.me/5511988890934" >&2; exit 1; }
+    fi
   fi
   # CRON ROBUSTO (fix bug-de-nascenca 01/09): o `|| true` cego deixava a casa nascer
   # com o cron MORTO sem ninguem saber — e o /atualiza (que roda pelo cron) travava
