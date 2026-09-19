@@ -1426,26 +1426,22 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
       done
       apt-get update -o Acquire::Check-Valid-Until=false --allow-releaseinfo-change >/dev/null 2>>/tmp/apt-base.err || true
       if ! "${APT_INSTALL[@]}" -o Acquire::Check-Valid-Until=false --fix-missing "${PACOTES_BASE[@]}" >/dev/null 2>>/tmp/apt-base.err; then
-        # QUARTA TENTATIVA: so o espelho principal da Debian (deb.debian.org <codinome> main),
-        # numa lista temporaria, sem tocar nas fontes do cliente. O main tem python3-pip,
-        # python3-venv e ffmpeg em versao valida mesmo quando o security esta desencontrado.
-        CODINOME=$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-}")
-        if [ -n "$CODINOME" ] && [ -r /etc/debian_version ]; then
-          echo "   (aviso) tento so pelo espelho principal da Debian ($CODINOME main)..."
-          LISTA_TMP=$(mktemp /tmp/leon-apt-main.XXXXXX)
-          printf 'deb http://deb.debian.org/debian %s main\ndeb http://deb.debian.org/debian %s-updates main\n' "$CODINOME" "$CODINOME" > "$LISTA_TMP"
-          APT_SO_MAIN=(-o "Dir::Etc::sourcelist=$LISTA_TMP" -o "Dir::Etc::sourceparts=-" -o Acquire::Check-Valid-Until=false)
-          apt-get "${APT_SO_MAIN[@]}" update >/dev/null 2>>/tmp/apt-base.err || true
-          "${APT_INSTALL[@]}" "${APT_SO_MAIN[@]}" --fix-missing "${PACOTES_BASE[@]}" >/dev/null 2>>/tmp/apt-base.err \
-            || { rm -f "$LISTA_TMP"; echo "ERRO: pacotes base do sistema nao instalaram." >&2
-                 [ -s /tmp/apt-base.err ] && echo "detalhe apt: $(tail -n 3 /tmp/apt-base.err)" >&2
-                 echo "abortando. suporte: https://wa.me/5511988890934" >&2; exit 1; }
-          rm -f "$LISTA_TMP"
-        else
-          echo "ERRO: pacotes base do sistema nao instalaram." >&2
-          [ -s /tmp/apt-base.err ] && echo "detalhe apt: $(tail -n 3 /tmp/apt-base.err)" >&2
-          echo "abortando. suporte: https://wa.me/5511988890934" >&2; exit 1
+        # 19/09, provado em container Debian 11 real: o pool do bullseye-security foi REMOVIDO
+        # do security.debian.org (48 .deb em 404, de python3-pip a curl e ffmpeg) e ainda nao
+        # esta no archive.debian.org. Instalar so do espelho principal tambem nao da: o sistema
+        # ja tem perl-base/libsystemd0 em versao do security e o apt recusa (held broken).
+        # Nao existe conserto por script hoje. O caminho certo e recriar a VPS com um sistema
+        # suportado. Dizer isso claro vale mais que uma quinta tentativa que falha igual.
+        DISTRO_ID=$(. /etc/os-release 2>/dev/null; echo "${ID:-}"); DISTRO_VER=$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}")
+        if [ "$DISTRO_ID" = "debian" ] && [ "${DISTRO_VER%%.*}" = "11" ] && grep -qE "security\.debian\.org.*404|debian-security.*404" /tmp/apt-base.err 2>/dev/null; then
+          echo "" >&2
+          echo "ERRO: esta VPS roda Debian 11, que saiu de suporte, e a Debian removeu os pacotes de seguranca dele (o apt devolve 404 em quase tudo). Nao tem como instalar programas nela hoje, nem o LEON nem outra coisa." >&2
+          echo "CONSERTO (5 minutos): no painel da hospedagem, reinstale o sistema da VPS escolhendo Ubuntu 24.04 ou Debian 12, e rode este mesmo comando de novo. Nada do LEON foi criado ainda, entao nao se perde nada." >&2
+          echo "suporte: https://wa.me/5511988890934" >&2; exit 1
         fi
+        echo "ERRO: pacotes base do sistema nao instalaram." >&2
+        [ -s /tmp/apt-base.err ] && echo "detalhe apt: $(tail -n 3 /tmp/apt-base.err)" >&2
+        echo "abortando. suporte: https://wa.me/5511988890934" >&2; exit 1
       fi
     fi
   fi
