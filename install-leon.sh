@@ -1353,7 +1353,9 @@ fi
 echo ""
 echo "========================================"
 echo "  PROJETO LEON · Socio IA 24x7"
+LEON_INSTALLER_STAMP="2026-09-21 10:52"
 echo "  instalador oficial"
+echo "  revisao do instalador: $LEON_INSTALLER_STAMP"
 echo "========================================"
 echo "  email:  $EMAIL"
 echo "  nome:   $NOME"
@@ -1375,6 +1377,39 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
   # travou o pulo root>leon (22/08). runuser nao consulta sudoers.
   command -v runuser >/dev/null 2>&1 \
     || { echo "ERRO: 'runuser' (util-linux) nao existe nesta VPS. suporte: https://wa.me/5511988890934" >&2; exit 1; }
+
+  # GUARDA DA UNIT ORFA (21/09/2026). Medido na bancada
+  # leon-inst-ubuntu2404-18set: a unit ficou em /etc com
+  # WorkingDirectory=/home/leon/socio-ia, mas o diretorio nao existia. Todo
+  # systemctl restart morria com status=200/CHDIR, enquanto o processo antigo
+  # ainda vivo seguia respondendo no Telegram: a casa parecia boa e so quebrava
+  # quando o cliente reiniciava.
+  #
+  # POR QUE ACONTECE: o trap religar_servico_antigo_se_abortar cobre saida
+  # normal e INT/TERM, mas morte nao-interceptavel (SIGKILL, OOM, queda de SSH,
+  # reboot do provedor) pula o trap e deixa unit + sudoers no disco apontando
+  # pra um runtime que a fase user nunca terminou de popular.
+  #
+  # TEM QUE VIR ANTES do 'is-active' abaixo: unit orfa NUNCA esta ativa (ela
+  # falha em 200/CHDIR), entao aquele bloco nao a enxerga e o instalador seguia
+  # por cima do entulho. Vem antes de apt, do pivot e de qualquer credencial:
+  # detectar casa quebrada e a primeira coisa, nao a ultima.
+  if [ -f /etc/systemd/system/leon-agente.service ] && [ ! -L /etc/systemd/system/leon-agente.service ]; then
+    UNIT_RUNTIME_ATUAL="$(sed -n 's/^WorkingDirectory=//p' /etc/systemd/system/leon-agente.service | head -n1)"
+    if [ -n "$UNIT_RUNTIME_ATUAL" ] && [ ! -e "$UNIT_RUNTIME_ATUAL/bridge.cjs" ]; then
+      UNIT_ORFA_BACKUP="/etc/systemd/system/leon-agente.service.orfa-$(date -u +%Y%m%dT%H%M%SZ)"
+      echo ">> a casa anterior ficou sem runtime em '$UNIT_RUNTIME_ATUAL'."
+      echo "   (uma instalacao anterior foi interrompida antes de terminar)"
+      echo "   guardando a unit quebrada em $UNIT_ORFA_BACKUP e recomecando limpo."
+      systemctl stop leon-agente.service >/dev/null 2>&1 || true
+      systemctl disable leon-agente.service >/dev/null 2>&1 || true
+      cp -p -- /etc/systemd/system/leon-agente.service "$UNIT_ORFA_BACKUP" 2>/dev/null || true
+      rm -f -- /etc/systemd/system/leon-agente.service
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      systemctl reset-failed leon-agente.service >/dev/null 2>&1 || true
+    fi
+    unset UNIT_RUNTIME_ATUAL
+  fi
 
   # Para servico antigo (instalacao anterior). Tem que parar ANTES da captura do
   # Telegram: dois consumidores de getUpdates no mesmo bot se derrubam.
@@ -1552,6 +1587,12 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
   else
     NODE_BIN_UNIT=/usr/bin/node
   fi
+  # A unit nasce aqui APONTANDO pra um dir que a fase user ainda vai popular:
+  # nesta altura o runtime legitimamente nao existe, entao o node --check NAO
+  # cabe aqui. A trava do runtime mora no ponto onde a unit de fato vira
+  # servico (secao 2.8, antes do 'enable --now'). O que cabe aqui e nao deixar
+  # /etc apontando pra um caminho pior do que o que ja estava: se a unit
+  # anterior era orfa, a guarda de entrada ja a aposentou.
   write_service_unit /etc/systemd/system/leon-agente.service "$LEON_USER" "$INSTALL_DIR_TMP" "$NODE_BIN_UNIT" "$LEON_ENGINE"
   systemctl daemon-reload
 
@@ -1726,6 +1767,15 @@ religar_servico_antigo_se_abortar() {
   local rc=$?
   if [ "$rc" -ne 0 ] && [ "${LEON_SERVICO_PARADO_PELO_INSTALADOR:-}" = "1" ] \
      && [ -f /etc/systemd/system/leon-agente.service ]; then
+    # GATE DA SAIDA (21/09/2026): nunca religar uma unit que aponta pra caminho
+    # inexistente. O start so produziria 200/CHDIR e a casa ficaria "falhando
+    # em silencio" em vez de honestamente parada. Melhor dizer a verdade.
+    UNIT_RUNTIME_ROLLBACK="$(sed -n 's/^WorkingDirectory=//p' /etc/systemd/system/leon-agente.service | head -n1)"
+    if [ -n "$UNIT_RUNTIME_ROLLBACK" ] && [ ! -e "$UNIT_RUNTIME_ROLLBACK/bridge.cjs" ]; then
+      echo ">> instalacao abortada e o LEON antigo nao existe mais em '$UNIT_RUNTIME_ROLLBACK': nao religo o servico (ele so daria erro)." >&2
+      echo "   rode a instalacao de novo. suporte: https://wa.me/5511988890934" >&2
+      exit "$rc"
+    fi
     if sudo -n /bin/systemctl start leon-agente.service >/dev/null 2>&1; then
       echo ">> instalacao abortada; o LEON antigo foi religado e continua no ar." >&2
     else
@@ -1985,63 +2035,104 @@ PY
   if ! python3 - "$BUNDLE_TMP" <<'PY'
 import posixpath, sys, tarfile
 
-# allowed_files: DEVE bater 1:1 com o RUNTIME_FILES do build-release-production.sh. Os 6 ultimos
-# (integracoes/sala-contrato/seletor/esteiras/skill-triggers/medir-tokens) foram adicionados ao bundle
-# em 09-10/09 (o bridge faz require top-level deles, sem eles morre em MODULE_NOT_FOUND), mas ESTA lista
-# ficou pra tras -> o install rejeitava por igualdade exata (seen==allowed_files) com "bundle Codex
-# incompleto ou com caminho inseguro" e travava TODA instalacao NOVA (bug do Bruno 11/09). O updater
-# ja aceitava (usa required<=seen, subconjunto), por isso a frota atualizava mas ninguem instalava novo.
-allowed_files = {
+# 21/09/2026 (2a rodada): a 1a correcao de hoje trocou a igualdade exata da lista de
+# ARQUIVOS por "exige o nucleo", mas deixou de pe a lista nominal de PASTAS
+# (directories) e a regra "arquivo solto na raiz so se for do nucleo". Medido na
+# bancada: um build futuro que criasse uma pasta nova (ex.: lib-skills/) ou um
+# arquivo novo na raiz derrubaria TODA instalacao nova de novo, exatamente o bug do
+# Bruno/Well em outra dimensao. Agora o criterio e por PERIGO, nao por lista:
+# recusa o que escapa da casa, o que e oculto, o que nao e arquivo comum, o que e
+# grande demais, o que e fundo demais e o que colide com DADO DO CLIENTE
+# (contrato de preservacao). Pasta nova e arquivo novo do nosso proprio build passam.
+required = {
     "bridge.cjs",
     "capabilities.json",
     "appserver/adapter.cjs",
     "appserver/index.cjs",
     "appserver/package.json",
-    "lib/autorizacao.cjs",
     "lib/onboarding.js",
+    "lib/seletor.cjs",
     "lib/inbound.js",
-    "lib/memoria-cli.cjs",
     "lib/meta-connect.js",
     "lib/meta-mcp-codex-filter.cjs",
     "lib/meta-account-guard.cjs",
     "lib/integracoes.cjs",
-    "lib/sala-contrato.cjs",
-    "lib/seletor.cjs",
-    "lib/esteiras.json",
-    "lib/skill-triggers.json",
     "lib/subagentes.cjs",
     "lib-motores/codex-appserver.cjs",
     "lib-motores/claude.cjs",
     "lib-motores/index.cjs",
     "lib-motores/limite.cjs",
     "smoke/appserver-smoke.cjs",
-    "workers/edge-tts.js",
-    "workers/edge-tts.py",
     "workers/piper.js",
-    "workers/medir-tokens.py",
 }
-allowed_dirs = {"appserver", "lib", "lib-motores", "smoke", "workers"}
+# Nomes que NUNCA podem vir dentro de um pacote de codigo: sao dado/config do
+# cliente e seriam sobrescritos pelo cp -a. Contrato de preservacao virando trava.
+protegidos = {
+    ".env",
+    "brain",
+    "memoria",
+    "promises",
+    "missoes",
+    "logs",
+    "sessoes",
+    "node_modules",
+    "personas",
+}
+extensoes_de_dado = (".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm", ".key", ".pem")
+PROFUNDIDADE_MAXIMA = 3
+TAMANHO_MAXIMO = 8_000_000  # 22/09 (2.6.7): bridge passou de 2 MB
+
+
+def recusa(motivo):
+    sys.stderr.write("   motivo: %s\n" % motivo)
+    raise SystemExit(1)
+
+
+def confere_componentes(name, original):
+    partes = name.split("/")
+    if len(partes) > PROFUNDIDADE_MAXIMA:
+        recusa("caminho fundo demais no pacote: %r" % original)
+    for parte in partes:
+        if parte in ("", ".", ".."):
+            recusa("caminho invalido no pacote: %r" % original)
+        if parte.startswith("."):
+            recusa("entrada oculta no pacote: %r" % original)
+        if parte.lower() in protegidos:
+            recusa("o pacote traz %r, que e dado do cliente e nao pode ser sobrescrito" % original)
+        if parte.lower().endswith(extensoes_de_dado):
+            recusa("o pacote traz %r, que e dado/credencial e nao pode vir em pacote de codigo" % original)
+
+
 try:
     members = tarfile.open(sys.argv[1], "r:gz").getmembers()
-except (OSError, tarfile.TarError):
-    raise SystemExit(1)
+except (OSError, tarfile.TarError) as erro:
+    recusa("o pacote nao abriu como tar.gz (%s)" % erro)
 seen = set()
 for member in members:
-    name = posixpath.normpath(member.name)
+    original = member.name
+    if "\\" in original:
+        recusa("caminho com barra invertida no pacote: %r" % original)
+    name = posixpath.normpath(original)
     if name == ".":
-        if member.name not in (".", "./") or not member.isdir():
-            raise SystemExit(1)
+        if original not in (".", "./") or not member.isdir():
+            recusa("raiz do pacote em formato inesperado: %r" % original)
         continue
-    if member.name.startswith("/") or name in ("", "..") or name.startswith("../"):
-        raise SystemExit(1)
+    if original.startswith("/") or name in ("", "..") or name.startswith("../"):
+        recusa("caminho inseguro no pacote: %r" % original)
+    confere_componentes(name, original)
     if member.isdir():
-        if name not in allowed_dirs:
-            raise SystemExit(1)
         continue
-    if not member.isfile() or name not in allowed_files or member.size > 2_000_000:
-        raise SystemExit(1)
+    if member.issym() or member.islnk():
+        recusa("link dentro do pacote: %r" % original)
+    if not member.isfile():
+        recusa("entrada que nao e arquivo comum: %r" % original)
+    if member.size > TAMANHO_MAXIMO:
+        recusa("arquivo acima de %d bytes: %r (%d bytes)" % (TAMANHO_MAXIMO, name, member.size))
     seen.add(name)
-raise SystemExit(0 if seen == allowed_files else 1)
+faltando = sorted(required - seen)
+if faltando:
+    recusa("faltam pecas do nucleo no pacote: %s" % ", ".join(faltando))
+raise SystemExit(0)
 PY
   then
     echo "ERRO: bundle Codex incompleto ou com caminho inseguro." >&2
@@ -2982,9 +3073,64 @@ if [ "$MOCK_MODE" != "1" ]; then
     exit 1
   fi
 
+  # GATE DO RUNTIME (21/09/2026): a unit so vira servico depois que o alvo dela
+  # EXISTE e compila NO LUGAR FINAL. Sem esta trava, uma fase user que nao
+  # chegou ao fim (rede caiu no meio da extracao, disco cheio) deixava /etc
+  # apontando pra um dir vazio e todo systemctl restart falhava com
+  # status=200/CHDIR — com o processo antigo ainda respondendo no Telegram, o
+  # cliente so descobria no proximo reboot.
+  UNIT_RUNTIME_FINAL="$(sed -n 's/^WorkingDirectory=//p' /etc/systemd/system/$SERVICE_NAME | head -n1)"
+  [ -z "$UNIT_RUNTIME_FINAL" ] && UNIT_RUNTIME_FINAL="$INSTALL_DIR"
+  if [ ! -d "$UNIT_RUNTIME_FINAL" ] || [ ! -f "$UNIT_RUNTIME_FINAL/bridge.cjs" ]; then
+    echo "ERRO: o runtime nao esta em '$UNIT_RUNTIME_FINAL'; o servico nao vai subir assim." >&2
+    echo "Nada foi ligado. Rode a instalacao de novo. suporte: https://wa.me/5511988890934" >&2
+    exit 1
+  fi
+  # O node do check e o MESMO que a unit vai usar (sai do ExecStart dela), nao
+  # o do PATH: no Codex o servico roda no Node dedicado da home do leon, e
+  # checar com outro binario provaria a coisa errada.
+  UNIT_NODE_FINAL="$(sed -n 's/^ExecStart=\([^ ]*\) .*/\1/p' /etc/systemd/system/$SERVICE_NAME | head -n1)"
+  [ -x "$UNIT_NODE_FINAL" ] || UNIT_NODE_FINAL="$(command -v node 2>/dev/null || true)"
+  if [ -n "$UNIT_NODE_FINAL" ] && ! "$UNIT_NODE_FINAL" --check "$UNIT_RUNTIME_FINAL/bridge.cjs" >/dev/null 2>&1; then
+    echo "ERRO: o bridge em '$UNIT_RUNTIME_FINAL' nao passou no node --check." >&2
+    echo "Nada foi ligado. Rode a instalacao de novo. suporte: https://wa.me/5511988890934" >&2
+    exit 1
+  fi
+
+  # Guarda a unit boa ANTES de mexer: se o servico nao subir, e ela que volta.
+  UNIT_PRE_START="$(mktemp)"
+  cp -p -- /etc/systemd/system/$SERVICE_NAME "$UNIT_PRE_START" 2>/dev/null || true
+
   sudo -n /bin/systemctl enable --now $SERVICE_NAME
 
-  sleep 3
+  # ESPERA ATE 20s pelo is-active (o 'sleep 3' antigo julgava cedo demais: um
+  # bridge que demora pra abrir o Telegram era dado como morto, e um bridge que
+  # morre no segundo 5 era dado como vivo).
+  LEON_SUBIU=0
+  for _i in $(seq 1 20); do
+    if sudo -n /bin/systemctl is-active $SERVICE_NAME >/dev/null 2>&1; then LEON_SUBIU=1; break; fi
+    sleep 1
+  done
+
+  if [ "$LEON_SUBIU" != "1" ]; then
+    # Nao deixa /etc com uma unit que so produz erro: devolve a que estava
+    # antes, com o motivo em portugues simples.
+    echo "" >&2
+    echo "O LEON nao subiu em 20 segundos." >&2
+    echo "Motivo provavel (ultimas linhas do log):" >&2
+    sudo -n /usr/bin/journalctl -u $SERVICE_NAME -n 200 --no-pager 2>/dev/null | tail -n 12 >&2 || true
+    if [ -s "$UNIT_PRE_START" ]; then
+      cp -p -- "$UNIT_PRE_START" /etc/systemd/system/$SERVICE_NAME 2>/dev/null \
+        || sudo -n /bin/systemctl stop $SERVICE_NAME >/dev/null 2>&1 || true
+    fi
+    rm -f -- "$UNIT_PRE_START"
+    echo "" >&2
+    echo "Teus arquivos estao em $INSTALL_DIR (nada foi apagado)." >&2
+    echo "Rode: sudo journalctl -u $SERVICE_NAME -n 50   ·   suporte: https://wa.me/5511988890934" >&2
+    exit 1
+  fi
+  rm -f -- "$UNIT_PRE_START"
+
   if sudo -n /bin/systemctl is-active $SERVICE_NAME >/dev/null; then
     echo ""
     echo "========================================"

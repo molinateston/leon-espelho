@@ -2592,6 +2592,37 @@ say() {
   printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG" 2>/dev/null || true
 }
 
+# 22/09: normalize_skills_catalog sela o stage read-only (dirs 0500, arquivos 0400/0500)
+# pra congelar o catálogo assinado. `rm -rf` num dir 0500 FALHA (sem +w o kernel não deixa
+# remover os filhos), então todo apagamento de stage passa por aqui: devolve +w e só então
+# apaga. Usado no trap (os dois ramos) e na faxina de início de rodada.
+limpa_stage_selado() {
+  local alvo="$1"
+  [ -n "$alvo" ] || return 0
+  [ -e "$alvo" ] || return 0
+  case "$alvo" in "$HOME"/*) ;; *) return 0 ;; esac
+  [ ! -L "$alvo" ] || { rm -f -- "$alvo" 2>/dev/null; return 0; }
+  chmod -R u+w -- "$alvo" 2>/dev/null
+  rm -rf -- "$alvo" 2>/dev/null
+}
+
+# 22/09: faxina de INÍCIO de rodada. Restos de rodadas antigas (stage selado e extract)
+# nunca são estado recuperável: o catálogo vivo é o LEON_SKILLS_DIR, e o backup da
+# transação corrente tem carimbo próprio. Sem isso o cliente acumulava um diretório
+# 0500 por /atualiza morto — 5 na casa do Muri — sem nunca ser avisado.
+limpa_restos_de_skills() {
+  local pai="$1" alvo n=0
+  [ -n "$pai" ] && [ -d "$pai" ] || return 0
+  for alvo in "$pai"/.skills-stage-* "$pai"/.skills-extract-*; do
+    [ -e "$alvo" ] || continue
+    limpa_stage_selado "$alvo"
+    [ -e "$alvo" ] && continue
+    n=$((n + 1))
+    say "faxina: removi resto de rodada anterior $alvo"
+  done
+  [ "$n" -eq 0 ] || say "faxina: $n resto(s) de catálogo removido(s) em $pai"
+}
+
 DOUTRINA_PLACEHOLDER=""
 DOUTRINA_PLACEHOLDER_ARQ=""
 fatal() {
@@ -2637,13 +2668,13 @@ cleanup_main() {
       # fora do runtime. Ele nunca é estado recuperável e deve desaparecer em
       # qualquer rollback; o backup antigo continua preservado pela transação.
       [ ! -e "$STAGE" ] || rm -rf -- "$STAGE"
+      # 22/09: esta limpeza do stage SELADO existia só no ramo de baixo. Quando o commit
+      # do catálogo falhava (MUTATION_STARTED já era 1), o stage 0500 ficava no disco pra
+      # sempre. Na casa do Muri empilharam 5 .skills-stage-* em 21-22/09, um por /atualiza.
+      limpa_stage_selado "${SKILLS_STAGE:-}"
     else
       [ ! -e "$STAGE" ] || rm -rf -- "$STAGE"
-      # normalize_skills_catalog sela o stage read-only (dirs 0o500, arquivos 0o400/0o500)
-      # pra congelar o catálogo assinado. rm -rf num dir 0o500 FALHA (sem +w não remove os
-      # filhos) e o /atualiza abortava aqui, deixando um stage órfão que travava os próximos
-      # updates. Devolve +w antes de apagar — o stage vai sumir de qualquer forma no rollback.
-      [ -z "${SKILLS_STAGE:-}" ] || [ ! -e "$SKILLS_STAGE" ] || { chmod -R u+w -- "$SKILLS_STAGE" 2>/dev/null; rm -rf -- "$SKILLS_STAGE"; }
+      limpa_stage_selado "${SKILLS_STAGE:-}"
       if [ "$CRON_ARMED" -eq 1 ]; then
         restore_crontab_from_tx "$TX_DIR" >/dev/null 2>&1 || true
       fi
@@ -2742,10 +2773,33 @@ if [ "$LEON_ENGINE_CASA" = codex ] && { [ "$TEST_MODE" != "1" ] || [ "$NODE_BIN"
 fi
 validate_service_unit "$UNIT_PATH" "$INSTALL_DIR" "$NODE_BIN" "$(id -un)" \
   || fatal "a unit do LEON não usa o runtime esperado nem o perfil endurecido. Rode novamente o instalador desta casa antes do /atualiza."
-SKILLS_STAGE="$LEON_DATA_DIR/.skills-stage-$TX_ID"
-SKILLS_BACKUP="$LEON_DATA_DIR/.skills-backup-$TX_ID"
-SKILLS_FAILED="$LEON_DATA_DIR/.skills-failed-$TX_ID"
+# 22/09 (causa provada na casa do cliente Muri, 5 /atualiza mortos no mesmo passo):
+# o stage nascia SEMPRE em LEON_DATA_DIR, mas o commit renomeia o stage PRA
+# LEON_SKILLS_DIR. Quando os dois nao tem o MESMO PAI, esse rename e proibido pelo
+# kernel: normalize_skills_catalog sela o stage em 0500, e renomear um DIRETORIO pra
+# outro pai exige escrita no proprio diretorio (o kernel precisa reescrever a entrada
+# '..'). Renomear DENTRO do mesmo pai nao mexe no '..' e passa com 0500. Como o segundo
+# mv vinha DEPOIS do primeiro (catalogo antigo ja guardado no backup), a casa ficava
+# sem catalogo e so voltava pelo rollback. O default LEON_DATA_DIR/skills tem o mesmo
+# pai e por isso a frota inteira passava; quem declara LEON_SKILLS_DIR em outro lugar
+# no .env batia de frente. O stage passa a nascer ao LADO do destino.
+SKILLS_PARENT="$(dirname -- "$LEON_SKILLS_DIR")"
+SKILLS_STAGE="$SKILLS_PARENT/.skills-stage-$TX_ID"
+SKILLS_BACKUP="$SKILLS_PARENT/.skills-backup-$TX_ID"
+SKILLS_FAILED="$SKILLS_PARENT/.skills-failed-$TX_ID"
 case "$LEON_SKILLS_DIR" in "$HOME"/*) ;; *) fatal "o catálogo de skills precisa ficar dentro da home." ;; esac
+# 22/09: o pai do catalogo e conferido ANTES de qualquer mutacao, e o erro diz o motivo
+# real. Antes o cliente so via "nao consegui ativar o catalogo Codex assinado" depois da
+# casa ja estar sem catalogo, sem pista nenhuma de qual dos tres casos era.
+if [ ! -e "$SKILLS_PARENT" ]; then
+  fatal "a pasta que guarda o catálogo de skills não existe: $SKILLS_PARENT. Crie-a (ou corrija LEON_SKILLS_DIR no .env) antes do /atualiza; nada foi trocado."
+fi
+if [ ! -d "$SKILLS_PARENT" ] || [ -L "$SKILLS_PARENT" ]; then
+  fatal "a pasta que guarda o catálogo de skills não é um diretório real: $SKILLS_PARENT (link simbólico ou arquivo). Corrija LEON_SKILLS_DIR no .env; nada foi trocado."
+fi
+if [ ! -w "$SKILLS_PARENT" ]; then
+  fatal "sem permissão de escrita na pasta que guarda o catálogo de skills: $SKILLS_PARENT. Corrija o dono/permissão dessa pasta; nada foi trocado."
+fi
 validate_runtime_roots 0 || fatal "os caminhos de dados são inseguros ou passam por link simbólico; runtime preservado."
 # QUAL MOTOR ESTA CASA USA. O runtime, a base e a unit sao os MESMOS nos dois motores,
 # entao tudo acima vale igual. O que segue e do CLI do Codex: versao pinada e config.toml.
@@ -2782,6 +2836,11 @@ mkdir -p -- "$TX_ROOT" "$CODEX_HOME_DIR" "$LEON_TMPDIR" "$LEON_WORK_AREA" \
 ensure_skills_personal_dir || fatal "nao consegui preparar a pasta de skills pessoais."
 chmod 0700 "$LEON_DATA_DIR" "$TX_ROOT" "$CODEX_HOME_DIR" 2>/dev/null || true
 validate_runtime_roots 1 || fatal "os caminhos de dados mudaram durante a preparação; runtime preservado."
+# 22/09: varre restos de rodadas mortas ANTES de começar. Roda nos dois lugares porque o
+# .env pode mandar o catálogo pra fora do LEON_DATA_DIR, e o histórico do cliente tem
+# stage velho nos dois. O backup da transação corrente nunca é tocado (carimbo por TX_ID).
+limpa_restos_de_skills "$LEON_DATA_DIR"
+[ "$SKILLS_PARENT" = "$LEON_DATA_DIR" ] || limpa_restos_de_skills "$SKILLS_PARENT"
 [ ! -e "$SKILLS_STAGE" ] && [ ! -e "$SKILLS_BACKUP" ] && [ ! -e "$SKILLS_FAILED" ] \
   || fatal "já existe uma transação de skills com os mesmos caminhos."
 mkdir -m 0700 "$TX_DIR"
@@ -3138,7 +3197,7 @@ for member in members:
         if name not in directories:
             raise SystemExit(1)
         continue
-    if not member.isfile() or member.size > 2_000_000:
+    if not member.isfile() or member.size > 8_000_000:  # 22/09 (2.6.7): bridge passou de 2 MB
         raise SystemExit(1)
     parent = posixpath.dirname(name)
     if parent:
@@ -3193,7 +3252,10 @@ fi
 verify_signed_artifact "$SKILLS_TMP" "$skills_sha256" "$skills_bytes" "catálogo de skills"
 audit_skills_archive "$SKILLS_TMP" \
   || fatal "o catálogo de skills contém membros inseguros ou incompletos."
-SKILLS_EXTRACT="$(mktemp -d "$LEON_DATA_DIR/.skills-extract-$TX_ID.XXXXXX")"
+# 22/09: o extract nasce no mesmo pai do destino, junto do stage. O `mv` logo abaixo
+# (SKILLS_ROOT -> SKILLS_STAGE) sai de dentro do extract, entao os dois precisam estar
+# no mesmo filesystem; e o stage, selado adiante, precisa ser vizinho do destino.
+SKILLS_EXTRACT="$(mktemp -d "$SKILLS_PARENT/.skills-extract-$TX_ID.XXXXXX")"
 tar --no-same-owner --no-same-permissions --delay-directory-restore \
   -xzf "$SKILLS_TMP" -C "$SKILLS_EXTRACT"
 SKILLS_ROOT="$SKILLS_EXTRACT/leon-skills"
@@ -3504,6 +3566,18 @@ if [ "$LEDGER_MIGRA" = 1 ]; then
   fi
 fi
 
+# 22/09: ULTIMA conferencia com a casa ainda INTACTA. O commit do catalogo e um rename
+# de diretorio selado (0500), que so e permitido DENTRO do mesmo pai e do mesmo
+# filesystem. Falhar aqui custa nada; falhar 4 linhas abaixo custa o catalogo do cliente,
+# que foi exatamente o que aconteceu 5 vezes na casa do Muri em 21-22/09.
+SKILLS_STAGE_DEV="$(stat -c %d -- "$SKILLS_STAGE" 2>/dev/null || true)"
+SKILLS_PARENT_DEV="$(stat -c %d -- "$SKILLS_PARENT" 2>/dev/null || true)"
+if [ -z "$SKILLS_STAGE_DEV" ] || [ -z "$SKILLS_PARENT_DEV" ]; then
+  fatal "não consegui conferir onde o catálogo de skills vai ser ativado ($SKILLS_PARENT); nada foi trocado."
+fi
+if [ "$SKILLS_STAGE_DEV" != "$SKILLS_PARENT_DEV" ]; then
+  fatal "o catálogo preparado ($SKILLS_STAGE) está num sistema de arquivos diferente do destino ($SKILLS_PARENT); a troca atômica é impossível e nada foi trocado."
+fi
 MUTATION_STARTED=1
 if [ -e "$LEON_SKILLS_DIR" ]; then
   if [ ! -d "$LEON_SKILLS_DIR" ] || [ -L "$LEON_SKILLS_DIR" ]; then
@@ -3517,7 +3591,7 @@ fi
 # uma interrupção entre a retirada do catálogo antigo e a ativação do novo.
 printf '1\n' > "$TX_DIR/skills-applied"
 mv -- "$SKILLS_STAGE" "$LEON_SKILLS_DIR" \
-  || fatal "não consegui ativar o catálogo Codex assinado."
+  || fatal "não consegui ativar o catálogo Codex assinado em $LEON_SKILLS_DIR (a troca vem de $SKILLS_STAGE); o catálogo anterior foi devolvido pelo rollback."
 [ "$(installed_skills_digest "$LEON_SKILLS_DIR")" = "$SKILLS_EXPECTED_DIGEST" ] \
   || fatal "o catálogo Codex mudou durante o commit."
 if [ "${LEON_TEST_FAIL_AT:-}" = "after_skills" ]; then
