@@ -865,6 +865,77 @@ PY
   printf '%s\n' "$nova"
 }
 
+# ---- CLI DO CLAUDE: O IRMAO DO DE CIMA (23/09) -------------------------------
+# Caso real de cliente: Claude Code 2.1.246 com claude-opus-5 no .env. Toda fala morria com
+# "does not support this model; version 2.1.280 or newer is required" e nada na frota subia o
+# CLI do Claude: o instalador so instala quando falta, o atualizador so cuidava do Codex.
+# O instalador (root) poe o CLI com o npm DO SISTEMA em /usr. Este atualizador roda como o
+# usuario do LEON (sem sudo; a unit tem ProtectSystem=full), entao o MESMO comando
+# (`npm install -g --prefix=<prefixo> @anthropic-ai/claude-code@latest`) vai pra um prefixo do
+# usuario, no molde do Codex: encenacao, prova de versao, rename atomico pra
+# claude-cli/releases/<versao>, e o .env do stage ganha CLAUDE_BIN apontando pro novo.
+# O CLI velho fica intacto: qualquer falha deixa a casa no binario de antes. Best-effort de
+# verdade: nenhum caminho daqui da fatal. O bridge tem o mesmo passo em segundo plano
+# (atualizaClaudeCliEmSegundoPlano), disparado quando o CLI recusa o modelo.
+LEON_CLAUDE_CLI_MINIMA="${LEON_CLAUDE_CLI_MINIMA:-2.1.280}"
+CLAUDE_CLI_PACOTE="@anthropic-ai/claude-code@latest"
+
+# `|| true` obrigatorio: o script roda com set -Eeuo pipefail. Binario quebrado (node ausente no
+# shebang, exit != 0) ou timeout (124) no --version passaria pelo pipefail e derrubaria o /atualiza
+# inteiro na atribuicao, justo na casa com CLI estragado que este passo existe pra consertar.
+# Versao ilegivel vira string vazia, que o chamador ja trata como "abaixo da minima".
+claude_cli_versao() {
+  PATH="${2:-/usr/local/bin:/usr/bin:/bin}" timeout 20 "$1" --version 2>/dev/null \
+    | awk 'NR == 1 { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) { print $i; exit } }' \
+    || true
+}
+
+# Onde o bridge acha o CLI do Claude (mesma ordem de lib-motores/claude.cjs resolveClaudeBin):
+# CLAUDE_BIN do .env, prefixos do usuario, depois os do sistema. Ecoa o caminho ou nada.
+resolve_claude_cli() {
+  local informado="$1" c
+  if [ -n "$informado" ] && [ -x "$informado" ]; then printf '%s\n' "$informado"; return 0; fi
+  for c in "$HOME"/.leon/node/releases/*/bin/claude "$HOME/.npm-global/bin/claude" "$HOME/.local/bin/claude" \
+           /usr/local/bin/claude /usr/bin/claude /snap/bin/claude; do
+    [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
+}
+
+# Ecoa o caminho do binario novo quando (e so quando) ele ja esta validado no lugar definitivo.
+subir_claude_cli() {
+  local data_dir="$1" minima="$2" tx="$3" node_bin="$4"
+  local raiz="$data_dir/claude-cli" staging nova release_novo bin_novo caminho
+  staging="$raiz/.upgrade-$tx"
+  caminho="$(dirname "$node_bin"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  rm -rf -- "$staging" 2>/dev/null || true
+  mkdir -p -- "$staging" 2>/dev/null || return 1
+  chmod 0700 "$raiz" "$staging" 2>/dev/null || true
+  CLAUDE_CLI_STAGING="$staging"
+  if ! env npm_config_audit=false npm_config_fund=false npm_config_update_notifier=false \
+        npm_config_cache="$raiz/.npm-cache" PATH="$caminho" \
+        timeout 300 npm install -g --prefix="$staging" "$CLAUDE_CLI_PACOTE" >/dev/null 2>&1; then
+    rm -rf -- "$staging" 2>/dev/null || true; CLAUDE_CLI_STAGING=""; return 1
+  fi
+  nova="$(claude_cli_versao "$staging/bin/claude" "$caminho")"
+  if [ -z "$nova" ] || ! semver_ge "$nova" "$minima" 2>/dev/null; then
+    rm -rf -- "$staging" 2>/dev/null || true; CLAUDE_CLI_STAGING=""; return 1
+  fi
+  release_novo="$raiz/releases/$nova"
+  if [ ! -e "$release_novo" ]; then
+    chmod -R go-w -- "$staging" 2>/dev/null || true
+    mkdir -p -- "$raiz/releases" 2>/dev/null || true
+    mv -- "$staging" "$release_novo" 2>/dev/null \
+      || { rm -rf -- "$staging" 2>/dev/null || true; CLAUDE_CLI_STAGING=""; return 1; }
+  else
+    rm -rf -- "$staging" 2>/dev/null || true
+  fi
+  CLAUDE_CLI_STAGING=""
+  bin_novo="$release_novo/bin/claude"
+  [ "$(claude_cli_versao "$bin_novo" "$caminho")" = "$nova" ] || return 1
+  printf '%s\n' "$bin_novo"
+}
+
 validate_dedicated_node() {
   "$PYTHON_BIN" - "$1" "$2" "$3" <<'PY'
 import os,stat,sys
@@ -1408,10 +1479,20 @@ JS
   [ "$rc" = 0 ] && [ -s "$saida" ]
 }
 
-# filter_user_env ORIGEM DESTINO [ARQUIVO_DE_NOMES_GERENCIADOS] [LIB_INTEGRACOES]
+# filter_user_env ORIGEM DESTINO [ARQUIVO_DE_NOMES_GERENCIADOS] [LIB_INTEGRACOES] [TOLERANTE]
 # Deixa em DESTINO.guardadas os NOMES (nunca valores) do que ficou em quarentena.
+#
+# TOLERANTE=1 (23/09, prova de preservacao 2.6.7 -> 2.6.8 na bancada): o bridge que vai subir
+# ja NAO recusa o .env por chave fora da allowlist (readSafeEnvFile guarda so o NOME e nao
+# exporta a chave a processo nenhum; LEON_ENV_ESTRITO=1 volta a recusa). Com esse bridge a
+# premissa "tudo-ou-nada" acima nao vale mais, e comentar a chave do dono so tirava a
+# integracao dele do ar: a rotina do dono que le o .env (cron, script, MCP) perdia a chave
+# em silencio a cada /atualiza. Medido na bancada: 8 de 8 chaves de integracao plantadas
+# viraram comentario na troca 2.6.7 -> 2.6.8. Tolerante, a chave fora da allowlist fica
+# ATIVA com o valor intacto, e a guardada antiga por esse motivo volta a ativa. Repetida,
+# fora do formato e valor invalido continuam guardadas: essas o bridge ainda recusa.
 filter_user_env() {
-  local source="$1" destination="$2" managed="${3:-}" lib="${4:-}"
+  local source="$1" destination="$2" managed="${3:-}" lib="${4:-}" tolerante="${5:-0}"
   local obra perfil verdict
   obra="$(mktemp -d "${TMPDIR:-/tmp}/leon-env.XXXXXX")" || return 1
   "$PYTHON_BIN" - "$source" "$obra/chaves" "$obra/perfil" <<'PY' || { rm -rf -- "$obra"; return 1; }
@@ -1436,9 +1517,10 @@ PY
   if [ -n "$lib" ] && bridge_env_verdict "$lib" "$perfil" "$obra/chaves" "$obra/verdict"; then
     verdict="$obra/verdict"
   fi
-  "$PYTHON_BIN" - "$source" "$destination" "${managed:-}" "$verdict" <<'PY' || { rm -rf -- "$obra"; return 1; }
+  "$PYTHON_BIN" - "$source" "$destination" "${managed:-}" "$verdict" "$tolerante" <<'PY' || { rm -rf -- "$obra"; return 1; }
 import os,re,sys
-source,destination,managed_file,verdict_file=sys.argv[1:]
+source,destination,managed_file,verdict_file,tolerante=sys.argv[1:]
+tolerante=(tolerante=="1")
 allowed={
  "TELEGRAM_BOT_TOKEN","OWNER_CHAT_ID","GROUP_CHAT_ID","ALLOWED_SENDERS",
  "LEON_LICENSE_EMAIL","LEON_LICENSE_KEY","LEON_LICENSE_CENTRAL","LEON_MACHINE_ID","AGENT_NAME","AGENT_GENDER",
@@ -1509,10 +1591,10 @@ for i,l in enumerate(cand):
             selected.append(marca("repetida",l,key,i)); continue
     elif ultimo_ativo.get(key)!=i:
         selected.append(marca("repetida",l,key,i)); continue
-    if not (key in allowed or (aceita is not None and key in aceita)):
-        selected.append(marca("fora-da-allowlist",l,key,i)); continue
     if any(ch in value for ch in "\r\n\x00") or len(value)>8192:
         selected.append(marca("valor",l,key,i)); continue
+    if not tolerante and not (key in allowed or (aceita is not None and key in aceita)):
+        selected.append(marca("fora-da-allowlist",l,key,i)); continue
     selected.append(key+"="+value)
 temp=destination+".allow-new"
 fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
@@ -1542,7 +1624,9 @@ rewrite_runtime_env() {
   # deixaria a casa apontando pra um nome que o motor de pe nem conhece.
   local codex_model existing_model
   if [ "$LEON_ENGINE_CASA" = claude ]; then
-    codex_model="claude-opus-5"
+    # 2.6.8: so vale pra casa SEM CODEX_MODEL (a de cima preserva o que ja existe). Sonnet e o
+    # padrao da frota desde o incidente de 23/09 (Opus zerava a janela do plano do cliente).
+    codex_model="claude-sonnet-5"
   else
     codex_model="${CODEX_MODEL_EFETIVO:-gpt-5.6-sol}"
   fi
@@ -1605,9 +1689,22 @@ CODEX_MODEL=$codex_model
 CODEX_REASONING_EFFORT=high
 EOF
   fi
+  # 23/09: o CLI do Claude subiu neste update. O bloco vence a cauda, entao um CLAUDE_BIN antigo
+  # do dono nao volta a apontar pro binario velho.
+  if [ -n "${CLAUDE_BIN_NOVO:-}" ]; then
+    printf 'CLAUDE_BIN=%s\n' "$CLAUDE_BIN_NOVO" >> "$bloco"
+  fi
   sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$bloco" | sort -u > "$geridas" \
     || { rm -f -- "$bloco" "$geridas"; return 1; }
-  filter_user_env "$env_file" "$cauda" "$geridas" "${STAGE:-}/lib/integracoes.cjs" \
+  # O bridge do STAGE tolera chave fora da allowlist? (readSafeEnvFile com _envEstrito, 21/09).
+  # Tolera e o dono nao pediu LEON_ENV_ESTRITO=1: a chave dele fica ativa.
+  local tolerante=0
+  if [ -n "${STAGE:-}" ] && [ -f "$STAGE/bridge.cjs" ] \
+     && grep -q 'function _envEstrito' "$STAGE/bridge.cjs" \
+     && ! grep -qE '^[[:space:]]*LEON_ENV_ESTRITO[[:space:]]*=[[:space:]]*["'"'"']?1["'"'"']?[[:space:]]*(#.*)?$' "$env_file"; then
+    tolerante=1
+  fi
+  filter_user_env "$env_file" "$cauda" "$geridas" "${STAGE:-}/lib/integracoes.cjs" "$tolerante" \
     || { rm -f -- "$bloco" "$cauda" "$geridas"; return 1; }
   cat -- "$cauda" "$bloco" > "$temp" \
     || { rm -f -- "$bloco" "$cauda" "$geridas" "$temp"; return 1; }
@@ -1799,6 +1896,80 @@ if "default_permissions" in data: raise SystemExit(1)
 if "permissions" in data: raise SystemExit(1)
 if "sandbox_workspace_write" in data: raise SystemExit(1)
 PY
+}
+
+# LEVA AS INTEGRACOES MCP DO DONO PRO config.toml NOVO (23/09, prova de preservacao).
+# write_codex_config_candidate gera o config.toml do molde e so re-poe o [mcp_servers.meta-ads],
+# que e do produto. Todo outro servidor MCP que o dono (ou o proprio LEON a pedido dele) ligou
+# no config.toml do Codex sumia do config ativo a cada /atualiza: medido na bancada, 2 de 2
+# servidores plantados sumiram na troca 2.6.7 -> 2.6.8 (a copia ficava so em
+# update-transactions/<tx>/config.backup, onde o Codex nao le).
+# Regra: todo [mcp_servers.<nome>] do config atual que o candidato NAO declara entra no
+# candidato com o valor identico (conferido relendo o TOML). Nome que o produto gerencia
+# (meta-ads) fica com o do produto: e ele quem decide se o bloco existe e em que modo.
+# Config atual ilegivel: o Codex tambem nao o le, entao nao ha integracao ativa a levar; a
+# copia inteira continua em config.backup da transacao. Falha ao levar = o update para
+# antes de trocar qualquer coisa (preservar vence).
+leva_mcp_do_dono() {  # leva_mcp_do_dono <config atual> <candidato>
+  local atual="$1" candidato="$2" nomes
+  [ -f "$atual" ] || return 0
+  nomes="$("$PYTHON_BIN" - "$atual" "$candidato" <<'PY'
+import json, math, os, re, sys, datetime
+try: import tomllib
+except ImportError: import tomli as tomllib
+atual, candidato = sys.argv[1:]
+GERENCIADOS = {"meta-ads"}
+try:
+    velho = tomllib.load(open(atual, "rb"))
+except Exception:
+    print("#ilegivel"); raise SystemExit(0)
+novo = tomllib.load(open(candidato, "rb"))
+mv = velho.get("mcp_servers")
+if not isinstance(mv, dict) or not mv: raise SystemExit(0)
+mn = novo.get("mcp_servers") if isinstance(novo.get("mcp_servers"), dict) else {}
+leva = {k: v for k, v in mv.items() if k not in mn and k not in GERENCIADOS and isinstance(v, dict)}
+if not leva: raise SystemExit(0)
+def chave(k): return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k, ensure_ascii=False)
+def valor(v):
+    if isinstance(v, bool): return "true" if v else "false"
+    if isinstance(v, int): return str(v)
+    if isinstance(v, float):
+        if math.isnan(v) or math.isinf(v): raise ValueError("float fora do TOML")
+        return repr(v)
+    if isinstance(v, str): return json.dumps(v, ensure_ascii=False)
+    if isinstance(v, (datetime.datetime, datetime.date, datetime.time)): return v.isoformat()
+    if isinstance(v, list): return "[" + ", ".join(valor(x) for x in v) + "]"
+    if isinstance(v, dict): return "{ " + ", ".join(chave(k) + " = " + valor(x) for k, x in v.items()) + " }"
+    raise ValueError("tipo fora do TOML")
+def tabela(caminho, d):
+    linhas = ["[" + ".".join(chave(p) for p in caminho) + "]"]
+    subs = []
+    for k, v in d.items():
+        if isinstance(v, dict): subs.append((k, v))
+        else: linhas.append(chave(k) + " = " + valor(v))
+    txt = "\n".join(linhas) + "\n"
+    for k, v in subs: txt += "\n" + tabela(caminho + [k], v)
+    return txt
+bloco = "\n# integracoes MCP do dono, trazidas do config.toml anterior pelo /atualiza\n"
+for nome, v in leva.items(): bloco += "\n" + tabela(["mcp_servers", nome], v)
+texto = open(candidato, encoding="utf-8").read()
+if not texto.endswith("\n"): texto += "\n"
+texto += bloco
+conf = tomllib.loads(texto)
+for nome, v in leva.items():
+    if conf["mcp_servers"].get(nome) != v: raise SystemExit("o servidor MCP " + nome + " nao voltou identico")
+tmp = candidato + ".mcp-new"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as fh: fh.write(texto)
+os.replace(tmp, candidato)
+print(" ".join(sorted(leva)))
+PY
+)" || return 1
+  case "$nomes" in
+    '') ;;
+    '#ilegivel') say "   config.toml atual ilegivel: nenhuma integracao MCP ativa pra levar (copia inteira em config.backup da transacao)." ;;
+    *) say "   config.toml: integracoes MCP do dono mantidas no config novo: $nomes" ;;
+  esac
 }
 
 tx_read() {
@@ -2560,6 +2731,11 @@ LEON_CODEX_CLI_MINIMA=""
 CODEX_CLI_ABAIXO_DA_MINIMA=0
 CODEX_CLI_SUBIU=0
 CODEX_CLI_STAGING=""
+CLAUDE_CLI_STAGING=""
+CLAUDE_CLI_ABAIXO_DA_MINIMA=0
+CLAUDE_CLI_SUBIU=0
+CLAUDE_CLI_VERSAO_ATUAL=""
+CLAUDE_BIN_NOVO=""
 CONFIG_PATH="$CODEX_HOME_DIR/config.toml"
 TX_ROOT="$LEON_DATA_DIR/update-transactions"
 TX_DIR="$TX_ROOT/$TX_ID"
@@ -2658,6 +2834,7 @@ cleanup_main() {
   # Prefixo de encenacao da subida do CLI: se formos mortos no meio do npm, nao pode sobrar
   # meia instalacao no disco. A release VIVA nunca esta aqui dentro, entao apagar e sempre seguro.
   [ -z "$CODEX_CLI_STAGING" ] || rm -rf -- "$CODEX_CLI_STAGING"
+  [ -z "$CLAUDE_CLI_STAGING" ] || rm -rf -- "$CLAUDE_CLI_STAGING"
   case "${LEON_UPDATE_COPIA:-}" in
     "${TMPDIR:-/tmp}"/leon-update.*) rm -f -- "$LEON_UPDATE_COPIA" ;;
   esac
@@ -2963,7 +3140,11 @@ if [ "${LEON_FORCE:-}" != 1 ] \
   && [ -n "${INSTALLED_RELEASE_DIGEST:-}" ] \
   && [ "$version" = "$INSTALLED_RELEASE_VERSION" ] \
   && [ "$RELEASE_MANIFEST_SHA256" = "$INSTALLED_RELEASE_DIGEST" ]; then
-  say "ja na versao $version com o mesmo digest; nada a trocar (LEON_FORCE=1 reinstala mesmo assim)"
+  # 2.6.8 (incidente 23/09): o vigia da casa (leon-base/scripts/update-verdict.sh, outro artefato)
+  # so reconhece "ja atual" com grep 'ltima vers' nas 20 ultimas linhas deste log. A frase antiga
+  # nao tinha isso e o dono ouvia "A atualizacao nao completou" estando na versao certa. A linha
+  # passa a conter a frase que o vigia ja le; status, codigo de saida e relato a central iguais.
+  say "ja estava na ultima versao $version com o mesmo digest; nada a trocar (LEON_FORCE=1 reinstala mesmo assim)"
   report_diagnostico_from_tx "$TX_DIR" ok "ja na versao $version; nada a fazer" 2>/dev/null || true
   # Pedido humano merece resposta; ciclo da madrugada fica em silencio, mesma
   # doutrina do resto do script.
@@ -3146,6 +3327,8 @@ unset _m
 if [ "$LEON_ENGINE_CASA" = codex ]; then
   write_codex_config_candidate "$TX_DIR/config.candidate" \
     || fatal "não consegui gerar o perfil Codex root-deny canônico."
+  leva_mcp_do_dono "$CONFIG_PATH" "$TX_DIR/config.candidate" \
+    || fatal "não consegui levar as integrações MCP do dono pro config.toml novo; nada foi trocado."
 fi
 
 # O bridge v2 depende do adapter e do shim da mesma versão. Baixamos um bundle
@@ -3452,6 +3635,26 @@ if [ "$CODEX_CLI_ABAIXO_DA_MINIMA" = "1" ] && [ "$TEST_MODE" != "1" -o "${LEON_T
     say "   o motor Codex não subiu agora; sigo com a $LEON_CODEX_CLI_VERSION e tento de novo no próximo /atualiza."
   fi
 fi
+# ---- MOTOR CLAUDE: o irmao do passo de cima (23/09) --------------------------
+# Casa Claude, ou casa que tem o CLI do Claude instalado (multimotor): garante a versao minima.
+# Mesmo lugar e mesma regra do Codex: antes de gravar o .env do stage, nada vivo mutado ainda,
+# falha nunca derruba o update.
+CLAUDE_BIN_ATUAL="$(resolve_claude_cli "$(env_get_from "$ENV_READ_SAFE" CLAUDE_BIN)" || true)"
+if { [ "$LEON_ENGINE_CASA" = claude ] || [ -n "$CLAUDE_BIN_ATUAL" ]; } \
+   && [ "$TEST_MODE" != "1" -o "${LEON_TEST_CLI_NATIVO:-0}" = "1" ]; then
+  [ -z "$CLAUDE_BIN_ATUAL" ] || CLAUDE_CLI_VERSAO_ATUAL="$(claude_cli_versao "$CLAUDE_BIN_ATUAL" "$(dirname "$NODE_BIN"):/usr/local/bin:/usr/bin:/bin" || true)"
+  if [ -z "$CLAUDE_CLI_VERSAO_ATUAL" ] || ! semver_ge "$CLAUDE_CLI_VERSAO_ATUAL" "$LEON_CLAUDE_CLI_MINIMA" 2>/dev/null; then
+    CLAUDE_CLI_ABAIXO_DA_MINIMA=1
+    say "   o programa do Claude desta casa está em '${CLAUDE_CLI_VERSAO_ATUAL:-ausente}', abaixo do mínimo $LEON_CLAUDE_CLI_MINIMA; atualizando (best-effort, teto de 5 min)..."
+    if CLAUDE_BIN_NOVO="$(subir_claude_cli "$LEON_DATA_DIR" "$LEON_CLAUDE_CLI_MINIMA" "$TX_ID" "$NODE_BIN")" && [ -n "$CLAUDE_BIN_NOVO" ]; then
+      CLAUDE_CLI_SUBIU=1
+      say "   programa do Claude agora na $(claude_cli_versao "$CLAUDE_BIN_NOVO" "$(dirname "$NODE_BIN"):/usr/local/bin:/usr/bin:/bin") ($CLAUDE_BIN_NOVO)."
+    else
+      CLAUDE_BIN_NOVO=""
+      say "   não consegui atualizar o programa do Claude agora; a casa segue no de antes e o bridge tenta de novo em segundo plano quando o modelo for recusado."
+    fi
+  fi
+fi
 
 rewrite_runtime_env "$STAGE/.env" \
   || fatal "o .env atual não pôde ser reduzido à configuração suportada; runtime preservado."
@@ -3724,6 +3927,14 @@ if [ "$CODEX_CLI_ABAIXO_DA_MINIMA" = "1" ] && [ "$CODEX_CLI_SUBIU" = "0" ]; then
   notify_from_runtime "$INSTALL_DIR" "✅ Atualizado! Tudo o que veio nesta versão já está no ar. Um detalhe só: o motor novo não subiu agora (deve ter sido rede). O Astra fica pra quando ele subir — eu tento de novo sozinho no próximo /atualiza, e você não precisa fazer nada." "$THREAD_ARG" "$CHAT_ARG" || true
 else
   rm -f "$INSTALL_DIR/.motor-antigo.json" 2>/dev/null || true
+fi
+# 3z-claude) (23/09) O programa do Claude ficou abaixo do minimo: o update do bridge foi inteiro,
+# o dono so precisa saber que o Opus pode ser recusado e que a casa segue no Sonnet sozinha.
+# Nao promete o proximo /atualiza: numa casa ja na ultima release este script sai cedo ("Nada pra
+# trocar") antes deste passo. Quem tenta de novo e o bridge (atualizaClaudeCliEmSegundoPlano, e o
+# /atualiza do dono via claudeCliNoAtualiza, que roda antes deste script).
+if [ "$CLAUDE_CLI_ABAIXO_DA_MINIMA" = "1" ] && [ "$CLAUDE_CLI_SUBIU" = "0" ] && [ "$LEON_ENGINE_CASA" = claude ]; then
+  notify_from_runtime "$INSTALL_DIR" "✅ Atualizado! Um detalhe: o programa do Claude desta casa (${CLAUDE_CLI_VERSAO_ATUAL:-versão desconhecida}) é mais velho que o mínimo ($LEON_CLAUDE_CLI_MINIMA) e não consegui atualizar agora (deve ter sido rede). Se o Opus for recusado eu sigo no Sonnet sozinho e tento atualizar o programa em segundo plano; se não der, eu te aviso." "$THREAD_ARG" "$CHAT_ARG" || true
 fi
 # 3a) AVISO DE LOGIN DO MODELO (02/set): o smoke do modelo virou aviso (não veto).
 # Se ele não passou lá na FASE 4, o update seguiu e chegou até aqui (versão nova no ar),

@@ -445,7 +445,11 @@ fi
 [ -z "$LEON_ENGINE" ] && LEON_ENGINE=claude
 # Modelo padrao do segundo motor. Mesmo nome que o bridge oferece no /modelo; o dono
 # troca depois pelo proprio comando, sem reinstalar nada.
-LEON_CLAUDE_MODEL="${LEON_CLAUDE_MODEL:-claude-opus-5}"
+# 2.6.8 (incidente 23/09): casa NOVA nasce no Sonnet. Com Opus cravado aqui a janela do plano
+# do cliente zerava em horas e o provedor recusava por ritmo (429). Quem quer Opus escolhe no
+# /modelo. Casa que JA existe nao e tocada: o bloco do .env mais abaixo mantem o modelo dela.
+_LEON_CLAUDE_MODEL_DADO="${LEON_CLAUDE_MODEL:-}"
+LEON_CLAUDE_MODEL="${LEON_CLAUDE_MODEL:-claude-sonnet-5}"
 if [ "$LEON_ENGINE" != "claude" ] && [ "$LEON_ENGINE" != "codex" ]; then
   echo "ERRO: LEON_ENGINE invalido (recebi '$LEON_ENGINE'); use 'claude' ou 'codex'." >&2
   exit 1
@@ -484,6 +488,7 @@ LEON_RELEASE_TRUST_FINGERPRINT='eb70521f5e4dd9bb1cd11e6ceb0b2bddd65596558322908a
 # release-manifest declara e que o update-pago-codex.sh valida.
 : "${LEON_NODE_VERSION:=22.22.0}"
 : "${LEON_CODEX_CLI_VERSION:=0.154.0}"
+: "${LEON_CLAUDE_CLI_MINIMA:=2.1.280}"   # 23/09: minimo do Claude Code (claude-opus-5 exige 2.1.280+)
 : "${LEON_NODE_ROOT:=}"
 : "${LEON_CODEX_CLI_ROOT:=}"
 : "${LEON_NODE_BIN_RESOLVED:=}"
@@ -1561,6 +1566,27 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
       echo "abortando. suporte: https://wa.me/5511988890934" >&2
       exit 1
     fi
+    # 23/09 (caso real de cliente): o passo acima so instalava quando FALTAVA. Uma casa com o
+    # Claude Code 2.1.246 reinstalada seguia na 2.1.246 e o claude-opus-5 do .env recusava toda
+    # fala ("version 2.1.280 or newer is required"). Irmao do pin do Codex: garante a minima com
+    # o MESMO comando do npm do sistema. Falha aqui nao aborta (o CLI existe e o Sonnet responde);
+    # o atualizador e o bridge tentam de novo.
+    claude_cli_versao() { PATH="$SYS_PATH" claude --version 2>/dev/null | awk 'NR == 1 { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) { print $i; exit } }' || true; }
+    claude_cli_minima_ok() {
+      local v; v="$(claude_cli_versao)"
+      [ -n "$v" ] && [ "$(printf '%s\n%s\n' "$LEON_CLAUDE_CLI_MINIMA" "$v" | sort -V | head -n 1)" = "$LEON_CLAUDE_CLI_MINIMA" ]
+    }
+    if ! claude_cli_minima_ok; then
+      echo ">> o Claude Code desta VPS ($(claude_cli_versao || true)) esta abaixo do minimo $LEON_CLAUDE_CLI_MINIMA; atualizando (npm do sistema)..."
+      PATH="$SYS_PATH" /usr/bin/node /usr/bin/npm install -g --prefix=/usr @anthropic-ai/claude-code@latest \
+        >/dev/null 2>/tmp/npm-claude.err || true
+      if claude_cli_minima_ok; then
+        echo "   Claude Code atualizado."
+      else
+        echo "   AVISO: nao consegui atualizar o Claude Code agora (sigo na $(claude_cli_versao || echo 'versao atual')). O LEON responde no Sonnet e tenta atualizar sozinho depois." >&2
+        [ -s /tmp/npm-claude.err ] && echo "   detalhe npm: $(tail -n 3 /tmp/npm-claude.err)" >&2
+      fi
+    fi
     echo "   claude $(PATH="$SYS_PATH" claude --version 2>/dev/null)"
   fi
 
@@ -2633,6 +2659,94 @@ _env_nomes_gerenciadas() {
 }
 
 # escreve_env_preservando BLOCO_NOVO NOMES_GERENCIADOS [topo|fim]
+# LEVA AS INTEGRACOES MCP DO DONO PRO config.toml NOVO (23/09, prova de preservacao).
+# O passo do config.toml era "cat >": reinstalar por cima apagava todo [mcp_servers.*] que
+# o dono ligou no Codex (medido na bancada). Mesma regra do update-pago-codex.sh
+# (leva_mcp_do_dono): todo servidor do config anterior que o molde nao declara volta com
+# valor identico, conferido relendo o TOML. meta-ads e do produto: volta no MESMO modo
+# filtro do atualizador quando a casa tem o .meta-token.json, e nunca pela copia antiga
+# (que podia ser a url crua de 106 ferramentas). Se levar falhar, o config ANTERIOR volta
+# inteiro: perder o molde novo e menos grave que perder a integracao do dono.
+# O anterior fica em config.toml.anterior-<carimbo> (os 3 mais novos), como o .env.
+leva_mcp_do_dono_instalador() {  # <config anterior ou vazio> <config novo>
+  local ANT="$1" NOVO="$2" NOMES
+  if [ -f "$INSTALL_DIR/.meta-token.json" ] && ! grep -q '^\[mcp_servers\.meta-ads\]' "$NOVO"; then
+    cat >> "$NOVO" <<METAEOF
+
+[mcp_servers.meta-ads]
+command = "node"
+args = ["$INSTALL_DIR/lib/meta-mcp-codex-filter.cjs"]
+startup_timeout_sec = 20
+tool_timeout_sec = 30
+METAEOF
+  fi
+  { ls -1t "$LEON_CODEX_HOME"/config.toml.anterior-* 2>/dev/null | tail -n +4 | while IFS= read -r _velho; do
+      rm -f -- "$_velho"
+    done ; } || true
+  [ -n "$ANT" ] && [ -f "$ANT" ] || return 0
+  if ! NOMES="$(python3 - "$ANT" "$NOVO" <<'PY'
+import json, math, os, re, sys, datetime
+try: import tomllib
+except ImportError: import tomli as tomllib
+atual, candidato = sys.argv[1:]
+GERENCIADOS = {"meta-ads"}
+try:
+    velho = tomllib.load(open(atual, "rb"))
+except Exception:
+    print("#ilegivel"); raise SystemExit(0)
+novo = tomllib.load(open(candidato, "rb"))
+mv = velho.get("mcp_servers")
+if not isinstance(mv, dict) or not mv: raise SystemExit(0)
+mn = novo.get("mcp_servers") if isinstance(novo.get("mcp_servers"), dict) else {}
+leva = {k: v for k, v in mv.items() if k not in mn and k not in GERENCIADOS and isinstance(v, dict)}
+if not leva: raise SystemExit(0)
+def chave(k): return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k, ensure_ascii=False)
+def valor(v):
+    if isinstance(v, bool): return "true" if v else "false"
+    if isinstance(v, int): return str(v)
+    if isinstance(v, float):
+        if math.isnan(v) or math.isinf(v): raise ValueError("float fora do TOML")
+        return repr(v)
+    if isinstance(v, str): return json.dumps(v, ensure_ascii=False)
+    if isinstance(v, (datetime.datetime, datetime.date, datetime.time)): return v.isoformat()
+    if isinstance(v, list): return "[" + ", ".join(valor(x) for x in v) + "]"
+    if isinstance(v, dict): return "{ " + ", ".join(chave(k) + " = " + valor(x) for k, x in v.items()) + " }"
+    raise ValueError("tipo fora do TOML")
+def tabela(caminho, d):
+    linhas = ["[" + ".".join(chave(p) for p in caminho) + "]"]
+    subs = []
+    for k, v in d.items():
+        if isinstance(v, dict): subs.append((k, v))
+        else: linhas.append(chave(k) + " = " + valor(v))
+    txt = "\n".join(linhas) + "\n"
+    for k, v in subs: txt += "\n" + tabela(caminho + [k], v)
+    return txt
+bloco = "\n# integracoes MCP do dono, trazidas do config.toml anterior pela reinstalacao\n"
+for nome, v in leva.items(): bloco += "\n" + tabela(["mcp_servers", nome], v)
+texto = open(candidato, encoding="utf-8").read()
+if not texto.endswith("\n"): texto += "\n"
+texto += bloco
+conf = tomllib.loads(texto)
+for nome, v in leva.items():
+    if conf["mcp_servers"].get(nome) != v: raise SystemExit("o servidor MCP " + nome + " nao voltou identico")
+tmp = candidato + ".mcp-new"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as fh: fh.write(texto)
+os.replace(tmp, candidato)
+print(" ".join(sorted(leva)))
+PY
+)"; then
+    cp -p -- "$ANT" "$NOVO" && chmod 600 "$NOVO"
+    echo "   ATENCAO: nao consegui levar as integracoes MCP pro config.toml novo; o config ANTERIOR voltou inteiro (nada do dono foi perdido)."
+    return 0
+  fi
+  case "$NOMES" in
+    '') ;;
+    '#ilegivel') echo "   config.toml anterior ilegivel: nenhuma integracao MCP ativa pra levar (copia em $ANT)." ;;
+    *) echo "   config.toml: integracoes MCP do dono mantidas: $NOMES" ;;
+  esac
+}
+
 escreve_env_preservando() {
   local BLOCO="$1" GERIDAS="$2" POS="${3:-topo}"
   local ENVF="$INSTALL_DIR/.env"
@@ -2730,7 +2844,7 @@ escreve_env_preservando() {
 // allowlistCliente()/manifestoAllowlist() do lib/integracoes.cjs recem-instalado,
 // e as checagens de linha sao as do readSafeEnvFile (bridge.cjs 111-125).
 const fs = require('fs');
-const [libPath, blocoPath, caudaPath, posicao, saidaPath, relPath] = process.argv.slice(2);
+const [libPath, blocoPath, caudaPath, posicao, saidaPath, relPath, toleranteArg] = process.argv.slice(2);
 const bloco = fs.readFileSync(blocoPath, 'utf8');
 let caudaBuf;
 try { caudaBuf = fs.readFileSync(caudaPath); } catch (e) { caudaBuf = Buffer.alloc(0); }
@@ -2778,6 +2892,10 @@ try {
   if (lista && typeof lista.has === 'function' && lista.size > 0) { ALLOWED = lista; consultou = 1; }
 } catch (e) { ALLOWED = null; }
 
+// Tolerante: o bridge recem-desempacotado aceita .env com chave desconhecida (a casca diz
+// pelo argumento) e o dono nao pediu o modo estrito no proprio arquivo.
+const tolerante = toleranteArg === '1'
+  && !/^\s*LEON_ENV_ESTRITO\s*=\s*["']?1["']?\s*(?:#.*)?$/m.test(textoCand);
 let saidaCauda;
 const guardadas = [];
 if (!consultou) {
@@ -2810,10 +2928,13 @@ if (!consultou) {
     // repetida: o bridge recusa o ARQUIVO inteiro em chave repetida (bridge.cjs
     // 115), entao a ULTIMA ocorrencia fica ativa e as anteriores ficam guardadas.
     if (doBloco.has(k) || ultimo.get(k) !== i) return marcar('repetida', b, k, i);
-    if (!ALLOWED.has(k)) return marcar('fora-da-allowlist', b, k, i);
     let v = m[2].replace(/\s+#.*$/, '').trim();
     if ((v.charAt(0) === '"' && v.slice(-1) === '"') || (v.charAt(0) === "'" && v.slice(-1) === "'")) v = v.slice(1, -1);
     if (/[\r\n\u0000]/.test(v) || v.length > 8192) return marcar('valor', b, k, i);
+    // 23/09 (prova de preservacao): bridge que tolera chave fora da allowlist (guarda so
+    // o NOME e nao a exporta; LEON_ENV_ESTRITO=1 volta a recusa) nao precisa da quarentena.
+    // Comentar a chave do dono so tirava a integracao dele do ar pra quem le o .env.
+    if (!ALLOWED.has(k) && !tolerante) return marcar('fora-da-allowlist', b, k, i);
     return b;
   });
 }
@@ -2835,9 +2956,12 @@ VALIDADOR_ENV
   [ -x /usr/bin/node ] && NODEBIN=/usr/bin/node
   [ -z "$NODEBIN" ] && NODEBIN="$(command -v node 2>/dev/null || true)"
   : > "$OBRA/relatorio"
+  # O bridge que vai subir tolera chave fora da allowlist? (readSafeEnvFile com _envEstrito)
+  local TOLERANTE=0
+  [ -f "$INSTALL_DIR/bridge.cjs" ] && grep -q 'function _envEstrito' "$INSTALL_DIR/bridge.cjs" && TOLERANTE=1
   if [ -n "$NODEBIN" ] && [ -f "$INSTALL_DIR/lib/integracoes.cjs" ] \
      && "$NODEBIN" "$OBRA/validador.cjs" "$INSTALL_DIR/lib/integracoes.cjs" \
-        "$OBRA/bloco" "$OBRA/cauda" "$POS" "$TMP_NOVO" "$OBRA/relatorio" 2>"$OBRA/erro"; then
+        "$OBRA/bloco" "$OBRA/cauda" "$POS" "$TMP_NOVO" "$OBRA/relatorio" "$TOLERANTE" 2>"$OBRA/erro"; then
     :
   else
     # Sem node ou sem lib/integracoes.cjs (o stub do MOCK nao tem): preserva tudo
@@ -2902,6 +3026,18 @@ if [ "$LEON_ENGINE" = codex ] || [ "$LEON_ENGINE" = claude ]; then
 fi
 
 if [ "$LEON_ENGINE" = claude ]; then
+  # CASA QUE JA EXISTE MANTEM O MODELO (lei: instalacao nao sobrescreve o que e do cliente).
+  # CODEX_MODEL e chave gerenciada, entao sem isto reinstalar por cima trocaria em silencio o
+  # modelo que a casa ja usa pelo padrao novo. So quando ninguem passou LEON_CLAUDE_MODEL
+  # explicito e so se o valor antigo e um nome de modelo do Claude bem formado.
+  if [ -z "${_LEON_CLAUDE_MODEL_DADO:-}" ] && [ -f "$INSTALL_DIR/.env" ]; then
+    _modelo_antigo="$(sed -n 's/^CODEX_MODEL=//p' "$INSTALL_DIR/.env" 2>/dev/null | head -1)"
+    if printf '%s' "$_modelo_antigo" | grep -qE '^claude-[A-Za-z0-9._-]+$'; then
+      LEON_CLAUDE_MODEL="$_modelo_antigo"
+      echo ">> casa ja existente: mantenho o modelo dela ($LEON_CLAUDE_MODEL)"
+    fi
+    unset _modelo_antigo
+  fi
   _ENV_BLOCO_NOVO="$_ENV_BLOCO_NOVO$(_env_bloco_c)
 "
   mkdir -p "$LEON_DATA_DIR/claude"
@@ -2931,6 +3067,13 @@ if [ "$LEON_ENGINE" = codex ]; then
   # fala (low no trivial, high na missão e no pedido de raciocínio), então este valor é só o
   # piso de quem roda o Codex fora da ponte. "high" cravado aqui era raciocínio invisível
   # cobrado em todo turno, e é o que estourava a cota do dono no plano Plus.
+  # 23/09 (prova de preservacao): o config.toml anterior e guardado ANTES do molde
+  # sobrescrever, pra levar as integracoes MCP do dono logo abaixo.
+  _CFG_ANTERIOR=""
+  if [ -f "$LEON_CODEX_HOME/config.toml" ] && [ ! -L "$LEON_CODEX_HOME/config.toml" ]; then
+    _CFG_ANTERIOR="$LEON_CODEX_HOME/config.toml.anterior-$(date -u +%Y%m%dT%H%M%SZ)"
+    cp -p -- "$LEON_CODEX_HOME/config.toml" "$_CFG_ANTERIOR" && chmod 600 "$_CFG_ANTERIOR" || _CFG_ANTERIOR=""
+  fi
   cat > "$LEON_CODEX_HOME/config.toml" <<EOF
 model = "$CODEX_MODEL"
 model_reasoning_effort = "medium"
@@ -2990,6 +3133,7 @@ ignore_default_excludes = false
 "BOT_TOKEN" = "exclude"
 EOF
   chmod 600 "$LEON_CODEX_HOME/config.toml"
+  leva_mcp_do_dono_instalador "$_CFG_ANTERIOR" "$LEON_CODEX_HOME/config.toml"
 fi
 
 # ------------------------------------------------------------
