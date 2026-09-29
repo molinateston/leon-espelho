@@ -297,48 +297,1082 @@ service_write() {
   fi
 }
 
+# 24/09 (rodada 3): o leitor e o do bridge (leon_preserva env-valor, RE_KV). O grep '^CHAVE='
+# de antes nao via 'CODEX_BIN = /opt/meu-codex/bin/codex' (espaco em volta do '=', que o bridge
+# aceita), devolvia vazio e o /atualiza trocava o binario proprio do dono pelo do produto.
 env_get_from() {
   local file="$1" key="$2"
-  grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- \
-    | sed 's/[[:space:]]*#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//' \
-    || true
+  leon_preserva env-valor "$file" "$key" 2>/dev/null || true
 }
 
 # Lê uma única chave do .env pelo mesmo fd validado. Notificações e smokes
 # acontecem depois de renames; nunca voltamos a abrir o caminho com grep, nem
 # deixamos uma cópia temporária contendo o token em caso de sinal/crash.
+# 24/09 (rodada 5, LEITOR UNICO): as guardas de arquivo e o leitor sao os do leon_preserva
+# (env-valor-seguro): aspas, comentario no fim, espaco em volta do '=', CRLF e BOM na primeira
+# linha saem como o bridge le. Linha fora do formato ou chave repetida: sai 1.
 safe_env_value() {
   local file="$1" key="$2"
-  "$PYTHON_BIN" - "$file" "$key" <<'PY'
-import os,re,stat,sys
-path,key=sys.argv[1:]
-if not re.fullmatch(r"[A-Z][A-Z0-9_]*",key): raise SystemExit(1)
-seen=os.lstat(path)
-if not stat.S_ISREG(seen.st_mode) or stat.S_ISLNK(seen.st_mode) or seen.st_nlink!=1 \
-   or seen.st_uid!=os.getuid() or stat.S_IMODE(seen.st_mode)&0o077 or seen.st_size>256*1024:
-    raise SystemExit(1)
-fd=os.open(path,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0))
-try:
-    before=os.fstat(fd)
-    raw=os.read(fd,before.st_size+1)
-    after=os.fstat(fd)
-finally: os.close(fd)
-if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_dev!=seen.st_dev \
-   or before.st_ino!=seen.st_ino or after.st_dev!=before.st_dev or after.st_ino!=before.st_ino \
-   or after.st_nlink!=1 or after.st_size!=before.st_size or len(raw)!=before.st_size:
-    raise SystemExit(1)
-text=raw.decode("utf-8")
-found=None; keys=set()
-for line in text.splitlines():
-    if not line.strip() or line.lstrip().startswith("#"): continue
-    match=re.fullmatch(r"\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*",line)
-    if not match or match.group(1) in keys: raise SystemExit(1)
-    name,value=match.groups(); keys.add(name)
-    if name==key: found=value
-if found is None: raise SystemExit(1)
-sys.stdout.write(found)
-PY
+  leon_preserva env-valor-seguro "$file" "$key"
 }
+
+# >>> LEON-PRESERVA v1 (fonte unica: instalador/preserva-casa.py; a prova confere byte a byte)
+leon_preserva() {
+  "${PYTHON_BIN:-python3}" - "$@" <<'LEON_PRESERVA_PY'
+# LEON-PRESERVA v1 (23/09): o que e do dono fica como o dono deixou.
+#
+# FONTE UNICA. Este arquivo e copiado BYTE A BYTE para dentro de update-pago-codex.sh,
+# install-leon.sh e install-codex.sh (funcao leon_preserva, heredoc LEON_PRESERVA_PY), porque
+# os tres sao baixados sozinhos e nao enxergam arquivo vizinho. test/prova-preserva-estrutural.sh
+# confere que as tres copias sao identicas a este arquivo.
+#
+# LEI DO DONO: atualizar ou reinstalar NUNCA apaga, esconde ou troca integracao, configuracao,
+# escolha ou contexto do cliente. Tres reprovacoes da mesma classe (filtro por allowlist na
+# escrita, bloco gerenciado que vencia o dono, #LEON-GUARDADO que tirava a chave do ar)
+# trocaram o desenho: o arquivo do dono e a BASE e o produto so ACRESCENTA.
+#
+# SUBCOMANDOS
+#   env-acrescenta ENV PADROES TROCAS SAIDA RELATORIO [LEON_DATA_DIR]
+#       .env: toda linha do dono sai byte a byte. So entra no FIM a chave que falta, com o
+#       padrao do produto (ou com o valor que uma versao velha escondeu em #LEON-GUARDADO).
+#       A unica excecao e PRODUTO_ENV abaixo, e so quando o chamador provou que o valor atual
+#       e invalido (ele passa a chave em TROCAS). Saida 3 = o .env do dono tem linha que o
+#       bridge recusaria; nada e escrito e o chamador para sem mexer em nada.
+#       CODEX_BIN em TROCAS so troca quando o valor atual, lido como o bridge le, esta vazio ou
+#       dentro de <LEON_DATA_DIR>/codex-cli (o chamador passa LEON_DATA_DIR). Sem LEON_DATA_DIR,
+#       ou com binario do dono fora dessa pasta, a linha do dono fica (relatorio: binario-do-dono).
+#   home-do-motor ENV MOTOR PADRAO
+#       A pasta que o bridge usa HOJE pro motor (codex ou claude), na ordem do homeDoMotor do
+#       bridge.cjs: a chave do .env (CODEX_HOME / CLAUDE_CONFIG_DIR); senao ~/.<motor> quando
+#       tem credencial (auth.json ou .credentials.json); senao PADRAO. Sem .env (instalacao do
+#       zero) sai PADRAO. Os tres escritores gravam ISTO quando a chave falta num .env que ja
+#       existe: gravar a pasta do LEON mudaria a casa do login e dos MCPs do dono.
+#   toml-funde ATUAL MOLDE SAIDA RELATORIO RUNTIME
+#       config.toml do Codex no CODEX_HOME do LEON: o texto do dono e a base. Chave ou tabela
+#       que so o dono tem fica byte a byte; nas que os dois declaram vale o dono; o molde so
+#       acrescenta o que falta. Excecao: SEGURANCA_* abaixo. Saida 3 = o chamador mantem o
+#       arquivo do dono INTACTO (a seguranca nao cabe sem reescrever estrutura do dono; o python
+#       nao tem leitor TOML; ou o tomllib recusa mas o Codex pinado le, como BOM no comeco ou
+#       tabela inline em varias linhas do TOML 1.1). Saida 2 = ilegivel DE VERDADE: o tomllib
+#       recusa E o Codex pinado tambem recusa (LEON_PRESERVA_CODEX = binario do Codex,
+#       LEON_PRESERVA_PATH = PATH com o node dele). Sem Codex pra julgar nao sai 2: sai 3.
+#       BOM UTF-8 no comeco: analisa sem ele e devolve o arquivo com ele.
+#   env-valor ENV CHAVE
+#       Le UMA chave do jeito que o bridge le (comentario no fim e aspas saem, espaco em volta do
+#       '=', CRLF, BOM na primeira linha). Todo leitor dos escritores usa isto: valor com aspas ou
+#       comentario e escolha valida do dono.
+#   env-valor-seguro ENV CHAVE
+#       O mesmo leitor, sobre o arquivo aberto uma vez so com as guardas do bridge (arquivo
+#       comum, 0600 sem grupo/outros, dono = quem roda, nlink 1, ate 256 KiB, sem troca no meio).
+#       Linha fora do formato ou chave repetida = sai 1 (o bridge recusaria o arquivo inteiro).
+#   env-exporta ENV
+#       'export CHAVE=<valor com aspas de shell>' pra cada chave ativa, lido como o bridge le. E o
+#       que o vigia do /atualiza avalia antes de disparar o atualizador (a linha crua exportada
+#       levava aspas e comentario literais pro atualizador). .env que o bridge recusaria: nada.
+#   bases-do-dono ENV HOME [CHAVE=valor ...]
+#       LEITOR UNICO DAS PASTAS (24/09, rodada 5). Imprime 'CHAVE=<valor com aspas de shell>' pras
+#       pastas que o bridge deriva do LEON_DATA_DIR, na ORDEM do bridge: (1) LEON_DATA_DIR do .env
+#       (senao HOME/.leon); (2) BRAIN_DIR do .env ou <dados>/brain, e dele MEMVIVA_FILE e
+#       ASSUNTOS_FILE; (3) LEON_STATE_DIR do .env ou <dados>/state, e dele LEON_MISSIONS_DIR e
+#       LEON_PROMISES_DIR; (4) PERSONA_DIR; e LEON_SKILLS_PESSOAIS_DIR, LEON_TMPDIR,
+#       LEON_MISSION_OUTPUT_DIR, LEON_WORK_AREA, LEON_SKILLS_DIR (vazio quando o .env nao declara:
+#       o padrao do catalogo e de cada escritor). Com .env existente vale SO o .env (o bridge apaga
+#       do ambiente toda chave da allowlist antes de ler o .env); os CHAVE=valor do chamador so
+#       valem na instalacao do zero (sem .env). A funcao de shell leon_bases_do_dono (no mesmo
+#       bloco embutido) avalia esta saida no topo de cada escritor e no finalizador.
+#   skills-do-dono BACKUP CATALOGO_NOVO PESSOAIS [REGISTRO]
+#       Antes de apagar backup de catalogo: toda entrada do backup que nao e do produto vai
+#       para skills-pessoais; dentro de pasta com nome do produto, arquivo que nao existe na
+#       mesma pasta do catalogo novo vai para skills-pessoais/<nome>.catalogo-antigo-N/.
+#       REGISTRO = arquivo com o digest do catalogo que o produto instalou (skills-registra).
+#       Backup igual ao registro = catalogo intocado, sai 0 sem copiar nada. Registro ausente
+#       ou diferente = alguem mexeu (ate a 2.4.48 o LEON podia editar o catalogo): sai 10.
+#       Saida 10 = o backup tem coisa do dono (NUNCA apagar o backup).
+#   skills-registra CATALOGO REGISTRO
+#       Grava o digest do catalogo que o produto acabou de instalar (depois da saude aprovada).
+#   codex-home-do-dono ENV LEON_DATA_DIR
+#       Sai 0 quando o CODEX_HOME da casa e do dono: o .env declara outra pasta, ou nao declara
+#       nenhuma e ~/.codex tem credencial (o bridge usa o ~/.codex do dono), ou a pasta do
+#       LEON e link (ou passa por link) pra outro lugar, ou o config.toml dela e link. Nesses
+#       casos o produto nao escreve config.toml nenhum (merge atraves de link escreveria no
+#       ~/.codex pessoal do dono). Sai 1 = pasta do LEON de verdade.
+import hashlib
+import json
+import math
+import os
+import re
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+try:
+    import tomllib as _toml
+except ImportError:  # Python 3.10 e 3.9 (Ubuntu 22.04, Debian 11): o instalador garante o tomli
+    try:
+        import tomli as _toml
+    except ImportError:
+        _toml = None
+
+# ---------------------------------------------------------------------------------------------
+# A LISTA EXPLICITA do .env: as UNICAS chaves que o produto pode mudar numa linha que ja existe,
+# e so quando o valor atual e invalido (quem prova a invalidez e o chamador; aqui so se recusa
+# qualquer chave fora desta lista).
+PRODUTO_ENV = {
+    "LEON_CODEX_CLI_VERSION": "versao do Codex CLI pinada; muda so quando o CLI da casa ficou abaixo do minimo da release e o atualizador instalou o novo (o velho continua no disco)",
+    "CODEX_BIN": "binario pinado do Codex; muda junto com a versao acima, ou quando o caminho atual nao e executavel, e so se ele aponta pra dentro de <LEON_DATA_DIR>/codex-cli (binario proprio do dono fica)",
+    "CLAUDE_BIN": "binario do Claude; muda so quando o CLI da casa ficou abaixo do minimo e o atualizador instalou o novo",
+    "LEON_MACHINE_ID": "id derivado da maquina (MAC + hostname) que a central usa na ativacao; muda so na reinstalacao, quando nao bate com a maquina onde o instalador roda",
+    "LEON_LICENSE_KEY": "chave que a central devolve na ativacao; muda so quando a atual falta, esta malformada ou difere da que a central acabou de devolver",
+    "TELEGRAM_BOT_TOKEN": "so na reinstalacao, quando o Telegram recusa o token atual (getMe) e o dono informou outro que o Telegram aceita",
+}
+
+# A LISTA EXPLICITA do config.toml: o que o produto precisa por seguranca, contra o dono.
+SEGURANCA_DEFINIR = [
+    ("approval_policy",),    # o bridge decide aprovacao por thread; o config fora da ponte nunca pergunta menos que o produto
+    ("sandbox_mode",),       # danger-full-access (decisao do dono 04/09); outro modo mata o Codex no bwrap
+    ("allow_login_shell",),  # shell de login leria o .profile do usuario com segredo
+]
+SEGURANCA_DEFINIR_PREFIXO = [("shell_environment_policy", "filters")]  # segredo nunca vaza pro shell do Codex
+SEGURANCA_REMOVER = [("default_permissions",), ("permissions",), ("sandbox_workspace_write",)]  # perfil nomeado liga o bwrap e o Codex morre (provado no 99)
+GERENCIADO = [("mcp_servers", "meta-ads")]  # modo filtro do produto; a url crua expunha 106 ferramentas com escrita
+# O gerenciado so troca pelo bloco do molde quando o MOLDE declara o bloco. Molde sem o bloco
+# (o molde nao achou o token) e o dono com o bloco do filtro do produto (command node, args
+# terminando em meta-mcp-codex-filter.cjs): o bloco do dono FICA. Qualquer outro bloco
+# meta-ads do dono (url crua) sai, que e o motivo do gerenciado existir.
+FILTRO_META = "meta-mcp-codex-filter.cjs"
+# Mais: ("projects", <pasta do runtime>, "trust_level") = "untrusted". O runtime nunca e confiavel.
+
+# Nomes que o catalogo do PRODUTO ja teve (tarballs publicados 2.0.14 a 2.6.8, repositorio
+# molinateston/soft inteiro). Entrada de catalogo antigo com outro nome e do dono.
+PRODUTO_SKILLS = set("""
+.claude-plugin .fonte-unica-sha .git LICENSE OFICINA-TESTE-DE-OBEDIENCIA.md README.md SKILLS-MANIFEST.json
+_fonte canvas-design docx pdf pptx scripts skill-creator skills-manifest.json synced xlsx
+soft-apostila soft-apresentacao soft-atendimento-reclamacao soft-atendimento-triagem soft-consultoria-instagram
+soft-conteudo soft-conteudo-carrossel soft-conteudo-headlines soft-conteudo-impulsionar soft-conteudo-multiplataforma
+soft-conteudo-planner soft-conteudo-reels soft-conteudo-stories soft-contratos-consultoria soft-criativo-campeao
+soft-critico-copy soft-designer soft-editor-video soft-email-sequencia soft-exportar-documentos soft-financeiro
+soft-funil soft-funil-carta soft-funil-isca soft-funil-landing soft-funil-lowticket soft-funil-miniwebinar
+soft-funil-nutricao soft-funil-quiz soft-funil-recorrencia soft-funil-recuperacao soft-funil-upsell soft-funil-vsl
+soft-gestao-agil soft-google-docs soft-lancamento-pago soft-launch soft-leon soft-members soft-negocio-metricas
+soft-organizacao-vps soft-plano-negocio soft-plano-ofertas soft-plano-posicionamento soft-posicionamento
+soft-proposta-comercial soft-reel-7seg soft-sdr-kit soft-seo-auditoria soft-sistema soft-trafego-meta soft-treino
+soft-treino-dieta soft-tweet-card soft-vendas soft-vendas-call-prep soft-vendas-closer soft-vendas-contratos
+soft-vendas-copiloto soft-vendas-estrategias soft-vendas-objecao soft-vendas-outreach soft-vendas-posvenda
+soft-vendas-proposta soft-vendas-prospeccao soft-vendas-script soft-vendas-sdr soft-voz-leo-molina soft-webinar
+soft-webinar-chat soft-webinar-mensagens soft-webinar-oferta soft-webinar-paginas soft-webinar-plano
+soft-webinar-script soft-webinar-slides soft-webinario
+""".split())
+
+RE_KV = re.compile(r"^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$")                      # o mesmo do bridge
+RE_GUARDADO = re.compile(r"^#LEON-GUARDADO fora-da-allowlist ([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$")
+RE_ESTRITO = re.compile(r"""^\s*LEON_ENV_ESTRITO\s*=\s*["']?1["']?\s*(?:#.*)?$""")
+
+
+def grava(caminho, dados, modo=0o600):
+    temp = caminho + ".preserva-new"
+    try:
+        os.unlink(temp)
+    except FileNotFoundError:
+        pass
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), modo)
+    try:
+        os.write(fd, dados)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.chmod(temp, modo)
+    os.replace(temp, caminho)
+
+
+BOM_ENV = "\ufeff"
+
+
+def linhas_do_env(texto):
+    """As linhas como o bridge ve: o espaco do regex do JavaScript engole o U+FEFF no comeco da linha 1.
+    So a LEITURA tira o BOM; quem escreve devolve o arquivo com ele (byte a byte)."""
+    if texto.startswith(BOM_ENV):
+        texto = texto[len(BOM_ENV):]
+    return texto.split("\n")
+
+
+def valor_do_bridge(bruto):
+    v = re.sub(r"\s+#.*$", "", bruto).strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        v = v[1:-1]
+    return v
+
+
+def confere_env(linhas):
+    """As mesmas recusas do readSafeEnvFile do bridge. Devolve (problemas, ativas)."""
+    problemas, ativas = [], {}
+    for i, l in enumerate(linhas):
+        if not l.strip() or re.match(r"^\s*#", l):
+            continue
+        m = RE_KV.match(l)
+        if not m:
+            problemas.append("formato linha:%d" % (i + 1))
+            continue
+        k = m.group(1)
+        if k in ativas:
+            problemas.append("repetida %s" % k)
+            continue
+        v = valor_do_bridge(m.group(2))
+        if re.search(r"[\r\n\x00]", v) or len(v) > 8192:
+            problemas.append("valor %s" % k)
+        ativas[k] = i
+    return problemas, ativas
+
+
+def le_pares(caminho):
+    pares = []
+    if caminho and os.path.exists(caminho):
+        for l in open(caminho, encoding="utf-8").read().split("\n"):
+            if not l.strip():
+                continue
+            k, sep, v = l.partition("=")
+            if not sep or not re.fullmatch(r"[A-Z][A-Z0-9_]*", k):
+                raise SystemExit("par invalido em " + caminho)
+            pares.append((k, v))
+    return pares
+
+
+def valor_ativo(env, chave):
+    """Valor da chave como o bridge le (None = nao declarada)."""
+    achado = None
+    if env and os.path.exists(env):
+        for l in linhas_do_env(open(env, encoding="utf-8", errors="replace").read()):
+            m = RE_KV.match(l) if l.strip() and not re.match(r"^\s*#", l) else None
+            if m and m.group(1) == chave:
+                achado = valor_do_bridge(m.group(2))
+    return achado
+
+
+def dentro_de(raiz, caminho):
+    try:
+        r, c = os.path.normpath(os.path.abspath(raiz)), os.path.normpath(os.path.abspath(caminho))
+        return os.path.commonpath([r, c]) == r
+    except ValueError:
+        return False
+
+
+MOTOR_CHAVE = {"codex": "CODEX_HOME", "claude": "CLAUDE_CONFIG_DIR"}
+
+
+def tem_credencial(pasta):
+    return any(os.path.exists(os.path.join(pasta, n)) for n in ("auth.json", ".credentials.json"))
+
+
+def home_do_motor(env, motor, padrao):
+    """A ordem do homeDoMotor do bridge.cjs (passos 1, 3 e 4). No passo 4 o bridge usa
+    <LEON_DATA_DIR do .env>/<motor>: com LEON_DATA_DIR declarado, e ELE que vale (o PADRAO do
+    chamador so vale quando o .env nao declara, e ai e <HOME>/.leon/<motor>, o mesmo do bridge)."""
+    if not env or not os.path.exists(env):
+        return padrao
+    declarado = valor_ativo(env, MOTOR_CHAVE[motor])
+    if declarado:
+        return declarado
+    casa = os.environ.get("HOME", "")
+    if casa:
+        pessoal = os.path.join(casa, "." + motor)
+        if tem_credencial(pessoal):
+            return pessoal
+    dados = valor_ativo(env, "LEON_DATA_DIR")
+    if dados:
+        return os.path.join(dados, motor)
+    return padrao
+
+
+# Pastas que o bridge deriva do LEON_DATA_DIR (bridge.cjs 2788, 2789, 3705, 3742, 3746, 3747,
+# 4403, 4506, 4518, 4593, 4594), na ordem em que ele resolve. Cada uma: (chave, base, sufixo).
+BASES_DO_DONO = [
+    ("LEON_DATA_DIR", "HOME", ".leon"),
+    ("BRAIN_DIR", "LEON_DATA_DIR", "brain"),
+    ("MEMVIVA_FILE", "BRAIN_DIR", "MEMORIA-VIVA.md"),
+    ("ASSUNTOS_FILE", "BRAIN_DIR", "ASSUNTOS-VIVOS.md"),
+    ("LEON_STATE_DIR", "LEON_DATA_DIR", "state"),
+    ("LEON_MISSIONS_DIR", "LEON_STATE_DIR", "missions"),
+    ("LEON_PROMISES_DIR", "LEON_STATE_DIR", "promises"),
+    ("PERSONA_DIR", "LEON_DATA_DIR", "persona"),
+    ("LEON_SKILLS_PESSOAIS_DIR", "LEON_DATA_DIR", "skills-pessoais"),
+    ("LEON_TMPDIR", "LEON_DATA_DIR", "tmp"),
+    ("LEON_MISSION_OUTPUT_DIR", "LEON_DATA_DIR", "mission-output"),
+    ("LEON_WORK_AREA", "HOME", "trabalho"),
+    ("LEON_SKILLS_DIR", None, None),   # sem padrao aqui: casa Claude e casa Codex divergem
+]
+
+
+def bases_do_dono(env, casa, pares):
+    """{chave: pasta} como o bridge resolve pra esta casa. pares = CHAVE=valor do chamador, que
+    so valem sem .env (instalacao do zero)."""
+    tem_env = bool(env) and os.path.isfile(env)
+    do_chamador = {}
+    for p in pares:
+        k, sep, v = p.partition("=")
+        if not sep or k not in {b[0] for b in BASES_DO_DONO}:
+            raise SystemExit("par invalido pra bases-do-dono: " + k)
+        do_chamador[k] = v
+    r = {"HOME": casa}
+    for k, base, sufixo in BASES_DO_DONO:
+        v = (valor_ativo(env, k) or "") if tem_env else do_chamador.get(k, "")
+        if k == "LEON_SKILLS_PESSOAIS_DIR" and v:
+            v = re.sub(r"^\$LEON_DATA_DIR(?=/|$)", lambda _m: r["LEON_DATA_DIR"], v)   # bridge 4404
+        if not v and base:
+            v = os.path.join(r[base], sufixo)
+        r[k] = v
+    del r["HOME"]
+    return r
+
+
+def env_acrescenta(env, padroes_arq, trocas_arq, saida, relatorio, data_dir=""):
+    bruto = open(env, "rb").read() if os.path.exists(env) else b""
+    rel = []
+    try:
+        texto = bruto.decode("utf-8")
+    except UnicodeDecodeError:
+        texto = None
+    if texto is None or "\x00" in texto:
+        open(relatorio, "w").write("recusa arquivo-nao-e-texto-utf8\n")
+        return 3
+    bom = BOM_ENV if texto.startswith(BOM_ENV) else ""
+    linhas = linhas_do_env(texto)
+    problemas, ativas = confere_env(linhas)
+    if problemas:
+        open(relatorio, "w").write("".join("recusa %s\n" % p for p in problemas))
+        return 3
+    estrito = any(RE_ESTRITO.match(l) for l in linhas)
+    guardadas = {}
+    for l in linhas:
+        g = RE_GUARDADO.match(l)
+        if g and g.group(1) not in ativas:
+            guardadas[g.group(1)] = g.group(2)
+    padroes, trocas = le_pares(padroes_arq), le_pares(trocas_arq)
+    fora = [k for k, _ in trocas if k not in PRODUTO_ENV]
+    if fora:
+        raise SystemExit("troca pedida fora da lista do produto: " + " ".join(fora))
+    if "CODEX_BIN" in ativas:
+        # binario do dono fica: a troca so vale com o valor atual (lido como o bridge le) vazio
+        # ou dentro de <LEON_DATA_DIR>/codex-cli. Sem LEON_DATA_DIR nao ha como provar: fica.
+        atual_bin = valor_do_bridge(RE_KV.match(linhas[ativas["CODEX_BIN"]]).group(2))
+        if atual_bin and not (data_dir and dentro_de(os.path.join(data_dir, "codex-cli"), atual_bin)):
+            # binario do dono: a versao pinada anda junto com ele (24/09, rodada 5). Trocar so a
+            # versao deixava o .env dizendo um CLI e rodando outro.
+            if any(k in ("CODEX_BIN", "LEON_CODEX_CLI_VERSION") for k, _ in trocas):
+                rel.append("binario-do-dono CODEX_BIN")
+            trocas = [(k, v) for k, v in trocas if k not in ("CODEX_BIN", "LEON_CODEX_CLI_VERSION")]
+    novas = []
+    feitas = set()
+    for k, v in trocas:
+        if k in ativas:
+            i = ativas[k]
+            m = RE_KV.match(linhas[i])
+            # o mesmo valor como o bridge le (aspas, comentario no fim) nao e troca: a linha fica
+            if valor_do_bridge(m.group(2)) != valor_do_bridge(v):
+                linhas[i] = k + "=" + v
+                rel.append("trocada " + k)
+        elif k not in feitas:
+            novas.append(k + "=" + v)
+            rel.append("nova " + k)
+        feitas.add(k)
+    for k, v in padroes:
+        if k in ativas or k in feitas:
+            if k in ativas and k not in feitas and valor_do_bridge(RE_KV.match(linhas[ativas[k]]).group(2)) != valor_do_bridge(v):
+                rel.append("escolha-do-dono " + k)
+            continue
+        feitas.add(k)
+        gv = guardadas.get(k)
+        if gv is not None and not estrito and not re.search(r"[\r\n\x00]", gv) and len(gv) <= 8192:
+            novas.append(k + "=" + gv)
+            rel.append("religada " + k)
+        else:
+            novas.append(k + "=" + v)
+            rel.append("nova " + k)
+    if not estrito:
+        for k, gv in guardadas.items():
+            if k in feitas or re.search(r"[\r\n\x00]", gv) or len(gv) > 8192:
+                continue
+            feitas.add(k)
+            novas.append(k + "=" + gv)
+            rel.append("religada " + k)
+    corpo = "\n".join(linhas)
+    if novas:
+        if corpo and not corpo.endswith("\n"):
+            corpo += "\n"
+        corpo += "# LEON %s: chaves que faltavam neste .env (nenhuma linha acima foi mudada)\n" % time.strftime("%Y-%m-%d", time.gmtime())
+        corpo += "".join(n + "\n" for n in novas)
+    p2, _ = confere_env(corpo.split("\n"))
+    if p2:
+        raise SystemExit("o .env acrescido nao passaria no bridge: " + " ".join(p2))
+    grava(saida, (bom + corpo).encode("utf-8"))
+    open(relatorio, "w").write("".join(r + "\n" for r in rel))
+    return 0
+
+
+# ------------------------------------------------------------------------- config.toml --------
+class Ilegivel(Exception):
+    pass
+
+
+BOM = "\ufeff"
+
+
+def codex_le(texto):
+    """O Codex pinado le este config? True/False; None = nao ha Codex pra julgar."""
+    codex = os.environ.get("LEON_PRESERVA_CODEX", "")
+    if not codex or not os.path.isfile(codex) or not os.access(codex, os.X_OK):
+        return None
+    tmp = tempfile.mkdtemp(prefix="leon-juiz-codex-")
+    try:
+        grava(os.path.join(tmp, "config.toml"), texto.encode("utf-8"))
+        env = {"PATH": os.environ.get("LEON_PRESERVA_PATH") or os.environ.get("PATH", "/usr/bin:/bin"),
+               "HOME": os.environ.get("HOME", tmp), "CODEX_HOME": tmp, "LANG": "C.UTF-8"}
+        try:
+            r = subprocess.run([codex, "mcp", "list"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, env=env, timeout=90)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return r.returncode == 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def carrega(texto):
+    if _toml is None:
+        raise Ilegivel("sem tomllib/tomli")
+    try:
+        return _toml.loads(texto)
+    except Exception as e:  # noqa: BLE001
+        raise Ilegivel(str(e))
+
+
+def le_chave(s, pos):
+    """Chave TOML (bare, "basica" ou 'literal', com pontos). Devolve (partes, pos depois)."""
+    partes = []
+    n = len(s)
+    while True:
+        while pos < n and s[pos] in " \t":
+            pos += 1
+        if pos < n and s[pos] == '"':
+            j = pos + 1
+            while j < n and s[j] != '"':
+                j += 2 if s[j] == "\\" else 1
+            # a chave "basica" e decodificada pelo proprio leitor TOML (\U0001F600, \e...): o
+            # json.loads de antes estourava ValueError e o escritor saia 1 no meio
+            try:
+                partes.append(next(iter(carrega(s[pos:j + 1] + " = 0"))))
+            except (Ilegivel, StopIteration) as e:
+                raise Ilegivel("chave %s" % e)
+            pos = j + 1
+        elif pos < n and s[pos] == "'":
+            j = s.find("'", pos + 1)
+            if j < 0:
+                raise Ilegivel("chave literal sem fim")
+            partes.append(s[pos + 1:j])
+            pos = j + 1
+        else:
+            m = re.compile(r"[A-Za-z0-9_-]+").match(s, pos)
+            if not m:
+                raise Ilegivel("chave")
+            partes.append(m.group(0))
+            pos = m.end()
+        while pos < n and s[pos] in " \t":
+            pos += 1
+        if pos < n and s[pos] == ".":
+            pos += 1
+            continue
+        return tuple(partes), pos
+
+
+def declaracoes(texto):
+    """Quebra o texto em declaracoes (cabecalho, chave=valor, vazio/comentario), com as linhas."""
+    linhas = texto.split("\n")
+    out, tabela, em_aot = [], (), False
+    i, n = 0, len(linhas)
+    while i < n:
+        s = linhas[i].strip()
+        if not s or s.startswith("#"):
+            out.append({"k": "vazio", "ini": i, "fim": i})
+            i += 1
+            continue
+        j, buf = i, linhas[i]
+        while True:
+            try:
+                carrega(buf)
+                break
+            except Ilegivel:
+                j += 1
+                if j >= n:
+                    raise Ilegivel("linha %d" % (i + 1))
+                buf += "\n" + linhas[j]
+        if s.startswith("[["):
+            caminho, _ = le_chave(s, 2)
+            out.append({"k": "aot", "ini": i, "fim": j, "path": caminho})
+            tabela, em_aot = caminho, True
+        elif s.startswith("["):
+            caminho, _ = le_chave(s, 1)
+            out.append({"k": "tab", "ini": i, "fim": j, "path": caminho})
+            tabela, em_aot = caminho, False
+        else:
+            rel, _ = le_chave(linhas[i], 0)
+            out.append({"k": "kv", "ini": i, "fim": j, "path": tabela + rel, "rel": rel, "aot": em_aot, "tabela": tabela})
+        i = j + 1
+    return linhas, out
+
+
+def folhas(d, pre=()):
+    r = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            sub = folhas(v, pre + (k,))
+            if sub:
+                r.update(sub)
+            else:
+                r[pre + (k,)] = {}
+        else:
+            r[pre + (k,)] = v
+    return r
+
+
+def pega(d, caminho):
+    for p in caminho:
+        if not isinstance(d, dict) or p not in d:
+            return None, False
+        d = d[p]
+    return d, True
+
+
+def comeca(caminho, prefixo):
+    return caminho[:len(prefixo)] == prefixo
+
+
+def chave_txt(k):
+    return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k, ensure_ascii=False)
+
+
+def valor_txt(v):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        if math.isnan(v) or math.isinf(v):
+            raise Ilegivel("float")
+        return repr(v)
+    if isinstance(v, str):
+        return json.dumps(v, ensure_ascii=False)
+    if isinstance(v, list):
+        return "[" + ", ".join(valor_txt(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{ " + ", ".join(chave_txt(k) + " = " + valor_txt(x) for k, x in v.items()) + " }"
+    if hasattr(v, "isoformat"):
+        return v.isoformat()
+    raise Ilegivel("tipo")
+
+
+def eh_filtro_meta(bloco):
+    """O bloco meta-ads no modo filtro do produto: command node, args terminando no filtro."""
+    if not isinstance(bloco, dict) or bloco.get("command") != "node":
+        return False
+    args = bloco.get("args")
+    return isinstance(args, list) and bool(args) and isinstance(args[-1], str) and args[-1].endswith(FILTRO_META)
+
+
+def toml_funde(atual, molde_arq, saida, relatorio, runtime):
+    molde_txt = open(molde_arq, encoding="utf-8").read()
+    rel = []
+    if not os.path.exists(atual) or os.path.getsize(atual) == 0:
+        grava(saida, molde_txt.encode("utf-8"))
+        open(relatorio, "w").write("novo config.toml do molde\n")
+        return 0
+    if _toml is None:
+        # Python 3.10 sem tomli (Ubuntu 22.04): nao ter leitor nao faz o config do dono ilegivel.
+        open(relatorio, "w").write("sem-leitor-toml (python sem tomllib/tomli)\n")
+        return 3
+    M = carrega(molde_txt)
+    bom = ""
+    try:
+        texto = open(atual, encoding="utf-8").read()
+        if texto.startswith(BOM):
+            bom, texto = BOM, texto[len(BOM):]
+        O = carrega(texto)
+    except (Ilegivel, UnicodeDecodeError) as e:
+        try:
+            cru = open(atual, "rb").read().decode("utf-8")
+        except UnicodeDecodeError:
+            cru = None
+        juiz = codex_le(cru) if cru is not None else False
+        if juiz is True:
+            open(relatorio, "w").write("o-codex-le (o leitor TOML do python recusa: %s)\n" % str(e)[:100])
+            return 3
+        if juiz is None:
+            open(relatorio, "w").write("sem-codex-pra-julgar (o leitor TOML do python recusa: %s)\n" % str(e)[:100])
+            return 3
+        open(relatorio, "w").write("ilegivel %s\n" % str(e)[:120])
+        return 2
+    try:
+        linhas, decl = declaracoes(texto)
+    except (Ilegivel, ValueError) as e:
+        # o tomllib leu o arquivo do dono; quem nao fechou foi a nossa leitura de estrutura: o
+        # config fica INTACTO (3, aviso), nunca vira "ilegivel" (2) nem derruba o escritor (1)
+        open(relatorio, "w").write("estrutura-nao-lida (o config do dono fica intacto: %s)\n" % str(e)[:100])
+        return 3
+    FM = {p: v for p, v in folhas(M).items() if not any(comeca(p, t) for t in SEGURANCA_REMOVER)}
+    definir = {p: FM[p] for p in SEGURANCA_DEFINIR if p in FM}
+    for p, v in FM.items():
+        if any(comeca(p, pre) for pre in SEGURANCA_DEFINIR_PREFIXO):
+            definir[p] = v
+    if runtime:
+        definir[("projects", runtime, "trust_level")] = "untrusted"
+    # gerenciado: troca pelo do molde so quando o molde declara o bloco; sem o bloco no molde, o
+    # bloco do filtro do produto que o dono tem fica (o molde so nao achou o token)
+    fica_do_dono = []
+    for t in GERENCIADO:
+        ov, tem = pega(O, t)
+        if tem and not pega(M, t)[1] and eh_filtro_meta(ov):
+            fica_do_dono.append(t)
+            rel.append("gerenciado-do-dono " + ".".join(t))
+    tirar = SEGURANCA_REMOVER + [t for t in GERENCIADO if t not in fica_do_dono]
+    remove = set()
+    # 1) remocoes de seguranca e do gerenciado (o molde decide o gerenciado inteiro)
+    for idx, d in enumerate(decl):
+        if d["k"] in ("tab", "aot") and any(comeca(d["path"], t) for t in tirar):
+            remove.update(range(d["ini"], d["fim"] + 1))
+            for d2 in decl[idx + 1:]:
+                if d2["k"] in ("tab", "aot"):
+                    break
+                if d2["k"] == "kv":
+                    remove.update(range(d2["ini"], d2["fim"] + 1))
+        elif d["k"] == "kv":
+            if any(comeca(d["path"], t) for t in tirar):
+                remove.update(range(d["ini"], d["fim"] + 1))
+            elif any(comeca(t, d["path"]) and len(t) > len(d["path"]) and pega(O, t)[1] for t in tirar):
+                open(relatorio, "w").write("seguranca-em-tabela-inline %s\n" % ".".join(d["path"]))
+                return 3
+    tirados = [t for t in tirar if pega(O, t)[1]]
+    for t in tirados:
+        rel.append("removida " + ".".join(t))
+    # 2) seguranca: o valor do molde vence na chave que o dono tambem declara
+    troca = {}
+    for p, mv in definir.items():
+        ov, tem = pega(O, p)
+        if not tem or ov == mv:
+            continue
+        alvo = [d for d in decl if d["k"] == "kv" and d["path"] == p and not d["aot"]]
+        if len(alvo) != 1:
+            open(relatorio, "w").write("seguranca-fora-de-linha-propria %s\n" % ".".join(p))
+            return 3
+        d = alvo[0]
+        troca[d["ini"]] = (d["fim"], ".".join(chave_txt(x) for x in d["rel"]) + " = " + valor_txt(mv))
+        rel.append("seguranca " + ".".join(p))
+    # 3) o que falta: folha do molde que o dono nao tem (nem ele nem um prefixo dela como valor)
+    FO = folhas(O)
+    for t in tirados:
+        for p in list(FO):
+            if comeca(p, t):
+                del FO[p]
+
+    def dono_tem(p):
+        for k in range(1, len(p) + 1):
+            v, tem = pega(O, p[:k])
+            if tem and k < len(p) and not isinstance(v, dict):
+                return True  # o dono tem um valor onde o molde tem tabela: vale o dono
+            if tem and k == len(p):
+                return not any(comeca(p, t) for t in tirados)
+        return False
+    faltam = [p for p in FM if not dono_tem(p)]
+    for p in FO:
+        if p in FM and FO[p] != FM[p] and p not in definir:
+            rel.append("escolha-do-dono " + ".".join(p))
+    cabecalhos = {}
+    for idx, d in enumerate(decl):
+        if d["k"] == "tab" and d["ini"] not in remove:
+            cabecalhos[d["path"]] = idx
+    primeiro_cab = next((idx for idx, d in enumerate(decl) if d["k"] in ("tab", "aot")), None)
+    grupos = {}
+    for p in faltam:
+        grupos.setdefault(p[:-1], []).append(p)
+    depois_de = {}   # linha -> [texto] (insere depois desta linha; -1 = topo do arquivo)
+    fim_novos = []
+
+    def fim_secao(idx_cab):
+        ultimo = decl[idx_cab]["fim"]
+        for d in decl[idx_cab + 1:]:
+            if d["k"] in ("tab", "aot"):
+                break
+            if d["k"] == "kv":
+                ultimo = d["fim"]
+        return ultimo
+
+    def monta(extra_depois, extra_fim):
+        saida_l = []
+        if -1 in extra_depois:
+            saida_l.extend(extra_depois[-1])
+        i = 0
+        while i < len(linhas):
+            if i in troca:
+                fim, nova = troca[i]
+                saida_l.append(nova)
+                for k in range(i, fim + 1):
+                    if k in extra_depois:
+                        saida_l.extend(extra_depois[k])
+                i = fim + 1
+                continue
+            if i not in remove:
+                saida_l.append(linhas[i])
+            if i in extra_depois:
+                saida_l.extend(extra_depois[i])
+            i += 1
+        corpo = "\n".join(saida_l)
+        if extra_fim:
+            if corpo and not corpo.endswith("\n"):
+                corpo += "\n"
+            corpo += "\n" + "\n".join(extra_fim) + "\n"
+        return corpo
+
+    for pai in sorted(grupos, key=lambda c: (len(c), c)):
+        ps = grupos[pai]
+        linhas_kv = [chave_txt(p[-1]) + " = " + valor_txt(FM[p]) for p in ps]
+        tentativa_depois = {k: list(v) for k, v in depois_de.items()}
+        tentativa_fim = list(fim_novos)
+        if pai == ():
+            raiz = [d for d in decl[:primeiro_cab if primeiro_cab is not None else len(decl)] if d["k"] == "kv"]
+            onde = raiz[-1]["fim"] if raiz else -1
+            if onde == -1 and linhas_kv:
+                linhas_kv = linhas_kv + [""]
+            tentativa_depois.setdefault(onde, []).extend(linhas_kv)
+        elif pai in cabecalhos:
+            tentativa_depois.setdefault(fim_secao(cabecalhos[pai]), []).extend(linhas_kv)
+        else:
+            tentativa_fim.extend(([""] if tentativa_fim else []) + ["[" + ".".join(chave_txt(x) for x in pai) + "]"] + linhas_kv)
+        try:
+            carrega(monta(tentativa_depois, tentativa_fim))
+        except Ilegivel:
+            if any(p in definir for p in ps):
+                open(relatorio, "w").write("seguranca-nao-coube %s\n" % ".".join(pai))
+                return 3
+            for p in ps:
+                rel.append("nao-coube " + ".".join(p))
+            continue
+        depois_de, fim_novos = tentativa_depois, tentativa_fim
+        for p in ps:
+            rel.append("acrescentada " + ".".join(p))
+    corpo = monta(depois_de, fim_novos)
+    F = carrega(corpo)
+    FF = folhas(F)
+    # 4) a prova do que foi feito: dono intacto fora da lista, seguranca aplicada, molde onde faltava
+    for p, v in FO.items():
+        if p in definir:
+            continue
+        if FF.get(p, "\x00ausente") != v:
+            raise SystemExit("o merge mudou a chave do dono " + ".".join(p))
+    for p, v in definir.items():
+        if FF.get(p, "\x00ausente") != v:
+            open(relatorio, "w").write("seguranca-nao-aplicada %s\n" % ".".join(p))
+            return 3
+    for t in SEGURANCA_REMOVER:
+        if pega(F, t)[1]:
+            raise SystemExit("sobrou " + ".".join(t))
+    for t in GERENCIADO:
+        if pega(F, t)[0] != (pega(O, t)[0] if t in fica_do_dono else pega(M, t)[0]):
+            raise SystemExit("gerenciado divergente " + ".".join(t))
+    grava(saida, (bom + corpo).encode("utf-8"))
+    open(relatorio, "w").write("".join(r + "\n" for r in rel))
+    return 0
+
+
+# ------------------------------------------------------------------------------ skills --------
+def arvore(caminho):
+    h = hashlib.sha256()
+    for base, dirs, nomes in os.walk(caminho, followlinks=False):
+        dirs.sort()
+        for n in sorted(nomes):
+            f = os.path.join(base, n)
+            h.update(os.path.relpath(f, caminho).encode() + b"\0")
+            if os.path.islink(f):
+                h.update(b"L" + os.readlink(f).encode())
+            else:
+                with open(f, "rb") as fh:
+                    h.update(hashlib.sha256(fh.read()).digest())
+    return h.hexdigest()
+
+
+def privatiza(destino):
+    for base, dirs, nomes in os.walk(destino):
+        os.chmod(base, 0o700)
+        for x in nomes:
+            f = os.path.join(base, x)
+            if not os.path.islink(f):
+                os.chmod(f, 0o600 | (stat.S_IMODE(os.lstat(f).st_mode) & 0o100))
+
+
+def le_registro(registro):
+    try:
+        return open(registro, encoding="utf-8").read().strip()
+    except OSError:
+        return ""
+
+
+def arquivos_do_dono_em_pasta_do_produto(backup, novo, nome):
+    """Arquivos (e links) de backup/nome que nao existem em novo/nome, em caminho relativo."""
+    ob, on = os.path.join(backup, nome), os.path.join(novo, nome)
+    out = []
+    for base, dirs, nomes in os.walk(ob, followlinks=False):
+        dirs.sort()
+        for d in list(dirs):
+            if os.path.islink(os.path.join(base, d)):
+                nomes.append(d)
+                dirs.remove(d)
+        for n in sorted(nomes):
+            rel = os.path.relpath(os.path.join(base, n), ob)
+            if not os.path.lexists(os.path.join(on, rel)):
+                out.append(rel)
+    return out
+
+
+def skills_do_dono(backup, novo, pessoais, registro=None):
+    if not os.path.isdir(backup) or os.path.islink(backup):
+        return 0
+    if registro is not None:
+        reg = le_registro(registro)
+        if reg and reg == arvore(backup):
+            print("catalogo-intacto (igual ao que o produto instalou)")
+            return 0
+    produto = set(PRODUTO_SKILLS)
+    if os.path.isdir(novo):
+        produto.update(os.listdir(novo))
+    do_dono = sorted(n for n in os.listdir(backup) if n not in produto)
+    # Pasta com nome do produto nos dois catalogos: arquivo que so o backup tem e do dono.
+    parciais = []
+    for n in sorted(os.listdir(backup)):
+        if n in do_dono or not os.path.isdir(os.path.join(backup, n)) or os.path.islink(os.path.join(backup, n)):
+            continue
+        if not os.path.isdir(os.path.join(novo, n)) or os.path.islink(os.path.join(novo, n)):
+            continue
+        so_no_backup = arquivos_do_dono_em_pasta_do_produto(backup, novo, n)
+        if so_no_backup:
+            parciais.append((n, so_no_backup))
+    divergente = registro is not None
+    if not do_dono and not parciais:
+        if divergente:
+            print("catalogo-antigo-divergente (%s): o backup fica" % ("sem registro do que o produto instalou" if not le_registro(registro) else "difere do que o produto instalou"))
+            return 10
+        return 0
+    os.makedirs(pessoais, mode=0o700, exist_ok=True)
+    for n, rels in parciais:
+        obra = tempfile.mkdtemp(prefix=".catalogo-antigo-", dir=pessoais)
+        try:
+            for rel in rels:
+                o, d = os.path.join(backup, n, rel), os.path.join(obra, rel)
+                os.makedirs(os.path.dirname(d), exist_ok=True)
+                if os.path.islink(o) or not os.path.isdir(o):
+                    shutil.copy2(o, d, follow_symlinks=False)
+                else:
+                    shutil.copytree(o, d, symlinks=True)
+            privatiza(obra)
+            h, k, achou = arvore(obra), 1, None
+            while os.path.lexists("%s.catalogo-antigo-%d" % (os.path.join(pessoais, n), k)):
+                ex = "%s.catalogo-antigo-%d" % (os.path.join(pessoais, n), k)
+                if achou is None and os.path.isdir(ex) and arvore(ex) == h:
+                    achou = ex
+                k += 1
+            if achou:
+                print("ja-estava " + n + " -> " + os.path.basename(achou))
+            else:
+                destino = "%s.catalogo-antigo-%d" % (os.path.join(pessoais, n), k)
+                os.rename(obra, destino)
+                obra = None
+                print("copiada " + n + " (arquivos do dono dentro da pasta do produto: " + " ".join(rels[:20]) + ") -> " + os.path.basename(destino))
+        finally:
+            if obra:
+                shutil.rmtree(obra, ignore_errors=True)
+    for n in do_dono:
+        origem = os.path.join(backup, n)
+        destino = os.path.join(pessoais, n)
+        if os.path.lexists(destino):
+            if os.path.isdir(destino) and os.path.isdir(origem) and arvore(destino) == arvore(origem):
+                print("ja-estava " + n)
+                continue
+            k = 1
+            while os.path.lexists("%s.catalogo-antigo-%d" % (destino, k)):
+                k += 1
+            destino = "%s.catalogo-antigo-%d" % (destino, k)
+        if os.path.isdir(origem) and not os.path.islink(origem):
+            shutil.copytree(origem, destino, symlinks=True)
+            privatiza(destino)
+        else:
+            shutil.copy2(origem, destino, follow_symlinks=False)
+            if not os.path.islink(destino):
+                os.chmod(destino, 0o600)
+        print("copiada " + n + " -> " + os.path.basename(destino))
+    return 10
+
+
+def codex_home_do_dono(env, data_dir):
+    """Sai 0 quando o CODEX_HOME desta casa e do DONO (o produto nao escreve config.toml nele):
+    o .env declara outra pasta; ou nao declara nenhuma e ~/.codex tem credencial (o bridge usa o
+    ~/.codex, homeDoMotor); ou a pasta do LEON (<LEON_DATA_DIR>/codex) e link, ou passa por
+    link, pra outro lugar (o ~/.codex pessoal); ou o config.toml dela e link. Sai 1 = do LEON.
+    LEON_DATA_DIR declarado no .env vence o do chamador (e o que o bridge usa)."""
+    data_dir = valor_ativo(env, "LEON_DATA_DIR") or data_dir
+    leon = os.path.join(data_dir, "codex")
+    # a pasta que o bridge usa hoje: a declarada; sem CODEX_HOME no .env, o ~/.codex quando ele
+    # tem credencial (homeDoMotor); senao a do LEON
+    usa = home_do_motor(env, "codex", leon)
+    if os.path.normpath(usa) != os.path.normpath(leon):
+        print(("declarado " if valor_ativo(env, "CODEX_HOME") else "credencial-do-dono ") + usa)
+        return 0
+    if os.path.lexists(leon) and (os.path.islink(leon) or os.path.realpath(leon) != os.path.join(os.path.realpath(data_dir), "codex")):
+        print("link " + leon + " -> " + os.path.realpath(leon))
+        return 0
+    if os.path.islink(os.path.join(leon, "config.toml")):
+        print("config-link " + os.path.join(leon, "config.toml"))
+        return 0
+    return 1
+
+
+def le_env_seguro(caminho):
+    """O texto do .env aberto UMA vez, com as guardas do readSafeEnvFile do bridge; None = recusa."""
+    try:
+        visto = os.lstat(caminho)
+        if not stat.S_ISREG(visto.st_mode) or visto.st_nlink != 1 or visto.st_uid != os.getuid() \
+           or stat.S_IMODE(visto.st_mode) & 0o077 or visto.st_size > 256 * 1024:
+            return None
+        fd = os.open(caminho, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            antes = os.fstat(fd)
+            cru = os.read(fd, antes.st_size + 1)
+            depois = os.fstat(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        return None
+    if not stat.S_ISREG(antes.st_mode) or antes.st_nlink != 1 or (antes.st_dev, antes.st_ino) != (visto.st_dev, visto.st_ino) \
+       or (depois.st_dev, depois.st_ino) != (antes.st_dev, antes.st_ino) or depois.st_nlink != 1 \
+       or depois.st_size != antes.st_size or len(cru) != antes.st_size:
+        return None
+    try:
+        texto = cru.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return None if "\x00" in texto else texto
+
+
+def ativas_do_texto(texto):
+    """{chave: valor como o bridge le}; None = o bridge recusaria o arquivo inteiro."""
+    linhas = linhas_do_env(texto)
+    problemas, idx = confere_env(linhas)
+    if problemas:
+        return None
+    return {k: valor_do_bridge(RE_KV.match(linhas[i]).group(2)) for k, i in idx.items()}
+
+
+def env_valor_seguro(caminho, chave):
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", chave):
+        return 1
+    texto = le_env_seguro(caminho)
+    at = ativas_do_texto(texto) if texto is not None else None
+    if at is None or chave not in at:
+        return 1
+    sys.stdout.write(at[chave])
+    return 0
+
+
+def env_exporta(caminho):
+    texto = le_env_seguro(caminho)
+    at = ativas_do_texto(texto) if texto is not None else None
+    if at is None:
+        return 3
+    for k in sorted(at):
+        print("export " + k + "=" + shlex.quote(at[k]))
+    return 0
+
+
+def main(argv):
+    if not argv:
+        raise SystemExit(64)
+    cmd, a = argv[0], argv[1:]
+    if cmd == "env-acrescenta" and len(a) in (5, 6):
+        return env_acrescenta(*a)
+    if cmd == "home-do-motor" and len(a) == 3 and a[1] in MOTOR_CHAVE:
+        sys.stdout.write(home_do_motor(*a))
+        return 0
+    if cmd == "toml-funde" and len(a) == 5:
+        try:
+            return toml_funde(*a)
+        except Ilegivel as e:
+            # O texto do dono ja passou pela leitura: falha aqui e do merge, nao do dono. Intacto.
+            open(a[3], "w").write("merge-nao-fechou %s\n" % str(e)[:120])
+            return 3
+    if cmd == "skills-do-dono" and len(a) in (3, 4):
+        return skills_do_dono(*a)
+    if cmd == "skills-registra" and len(a) == 2:
+        if not os.path.isdir(a[0]) or os.path.islink(a[0]):
+            return 1
+        grava(a[1], (arvore(a[0]) + "\n").encode("utf-8"), 0o600)
+        return 0
+    if cmd == "codex-home-do-dono" and len(a) == 2:
+        return codex_home_do_dono(*a)
+    if cmd == "env-valor" and len(a) == 2:
+        # le UMA chave como o bridge le (comentario no fim e aspas saem); sai 1 se nao tem
+        achado = valor_ativo(a[0], a[1])
+        if achado is None:
+            return 1
+        sys.stdout.write(achado)
+        return 0
+    if cmd == "env-valor-seguro" and len(a) == 2:
+        return env_valor_seguro(*a)
+    if cmd == "env-exporta" and len(a) == 1:
+        return env_exporta(a[0])
+    if cmd == "bases-do-dono" and len(a) >= 2:
+        for k, v in bases_do_dono(a[0], a[1], a[2:]).items():
+            print(k + "=" + shlex.quote(v))
+        return 0
+    if cmd == "lista-produto-env":
+        for k in sorted(PRODUTO_ENV):
+            print(k + "\t" + PRODUTO_ENV[k])
+        return 0
+    raise SystemExit(64)
+
+
+sys.exit(main(sys.argv[1:]))
+LEON_PRESERVA_PY
+}
+# leon_bases_do_dono <.env do dono> [home do dono]: as pastas como o bridge resolve pra esta
+# casa (LEON_DATA_DIR do .env; dele BRAIN_DIR, MEMVIVA_FILE, ASSUNTOS_FILE, LEON_STATE_DIR,
+# LEON_MISSIONS_DIR, LEON_PROMISES_DIR, PERSONA_DIR e as outras). Com .env existente vale so o
+# .env, lido por leon_preserva; sem .env (instalacao do zero) valem so as pastas que o COMANDO
+# passou, lidas UMA vez aqui, quando o bloco carrega e antes de o script calcular qualquer pasta
+# (24/09, rodada 6). A saida de uma chamada nunca volta como entrada da seguinte: o instalador
+# rodando como root calculava ~root/.leon no topo e a fase root herdava isso pra casa do leon.
+if [ -z "${_LEON_BASES_DO_COMANDO_LIDO:-}" ]; then
+  _LEON_BASES_DO_COMANDO=("LEON_DATA_DIR=${LEON_DATA_DIR:-}" "BRAIN_DIR=${BRAIN_DIR:-}" \
+    "MEMVIVA_FILE=${MEMVIVA_FILE:-}" "ASSUNTOS_FILE=${ASSUNTOS_FILE:-}" \
+    "LEON_STATE_DIR=${LEON_STATE_DIR:-}" "LEON_MISSIONS_DIR=${LEON_MISSIONS_DIR:-}" \
+    "LEON_PROMISES_DIR=${LEON_PROMISES_DIR:-}" "PERSONA_DIR=${PERSONA_DIR:-}" \
+    "LEON_SKILLS_PESSOAIS_DIR=${LEON_SKILLS_PESSOAIS_DIR:-}" "LEON_TMPDIR=${LEON_TMPDIR:-}" \
+    "LEON_MISSION_OUTPUT_DIR=${LEON_MISSION_OUTPUT_DIR:-}" "LEON_WORK_AREA=${LEON_WORK_AREA:-}" \
+    "LEON_SKILLS_DIR=${LEON_SKILLS_DIR:-}")
+  _LEON_BASES_DO_COMANDO_LIDO=1
+fi
+leon_bases_do_dono() {
+  local _lb_saida
+  _lb_saida="$(leon_preserva bases-do-dono "$1" "${2:-$HOME}" "${_LEON_BASES_DO_COMANDO[@]}")" || return 1
+  eval "$_lb_saida"
+}
+# <<< LEON-PRESERVA v1
+
+# ENTRADA DO VIGIA (24/09, rodada 5; marca LEON-PRESERVA-ENTRADA v1). O vigia do /atualiza
+# (scripts/update-verdict.sh, bloco LEON-HANDOFF-UPDATE) le o .env pelo MESMO leitor antes de
+# disparar o atualizador: bash update-pago.sh --preserva env-exporta <.env>. A linha crua que ele
+# exportava levava aspas e comentario literais (LEON_DATA_DIR="/x" # nota) pro atualizador.
+if [ "${1:-}" = "--preserva" ]; then
+  shift
+  leon_preserva "$@"
+  exit $?
+fi
 
 if [ "${LEON_TEST_RELEASE_HELPERS_ONLY:-0}" = "1" ]; then
   case "${1:-}" in
@@ -397,6 +1431,278 @@ notify_from_runtime() {
   chat="${chat_override:-$(safe_env_value "$env_file" OWNER_CHAT_ID 2>/dev/null)}"
   [ -n "$token" ] && [ -n "$chat" ] || return 0
   telegram_api_send_message "$token" "$chat" "$text" "$thread" || true
+}
+
+# FONTE PRINCIPAL = GITHUB (23/09, lei do dono: "cliente nenhum pode depender da VPS, e sim de
+# repositorio git"). Ate aqui a central era a origem e o espelho publico no GitHub so a reserva
+# (baixa_com_espelho, 23/08; manifesto com espelho, 23/09 manha). Agora inverte: manifesto
+# assinado e cada artefato livre (atualizador, runtime, catalogo de skills) vem PRIMEIRO do
+# espelho (LEON_ESPELHO, raw.githubusercontent.com/molinateston/leon-espelho) e a central vira
+# reserva. A SEGURANCA NAO MUDA, venha de onde vier: chave pinada por fingerprint, assinatura
+# Ed25519, contrato e anti-downgrade no manifesto; sha256 e tamanho pinados pelo manifesto em
+# cada artefato. Manifesto que chega e nao confere ABORTA (falha fechada, nao troca de origem).
+# ESPELHO ATRASADO: o espelho pode ficar atras da central (sincroniza por hora e no fim do rito).
+# Se o manifesto do espelho nao e mais novo que o instalado, pergunto a central com timeout curto
+# e fico com o MAIS NOVO dos dois; a verificacao depois e a mesma. Central fora: vale o espelho.
+# Artefato: espelho primeiro; se o sha/tamanho nao bate com o manifesto (espelho atrasado ou
+# adulterado), tenta a central; nada entra sem bater. Origem em MANIFESTO_ORIGEM e
+# ARTEFATO_ORIGEM (espelho|central), pro upgrade.log e pro tx.
+LEON_ESPELHO="${LEON_ESPELHO:-https://raw.githubusercontent.com/molinateston/leon-espelho/main}"
+MANIFESTO_ORIGEM=""
+MANIFESTO_NOTA=""
+ARTEFATO_ORIGEM=""
+# versao declarada no manifesto, SEM conferir assinatura: serve so pra ESCOLHER a origem; quem
+# chama confere assinatura e contrato do escolhido depois.
+versao_do_manifesto() {  # <arquivo.json>
+  "$PYTHON_BIN" - "$1" <<'PY' 2>/dev/null
+import json,re,sys
+try: v=str(json.load(open(sys.argv[1],encoding="utf-8")).get("version",""))
+except Exception: raise SystemExit(1)
+if not re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)",v): raise SystemExit(1)
+print(v)
+PY
+}
+# json e sig da MESMA origem, sempre (nunca mistura um de cada lado).
+baixa_par() {  # <base-url> <nome.json> <nome.sig> <saida.json> <saida.sig> <max-json> <tentativas> <connect-timeout>
+  local b="$1" nj="$2" ns="$3" oj="$4" os="$5" mj="$6" tent="$7" ct="$8"
+  [ -n "$b" ] || return 1
+  { : > "$oj" && : > "$os"; } 2>/dev/null || return 1
+  curl_common -fsSL --max-filesize "$mj" --retry "$tent" --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL \
+      --connect-timeout "$ct" --max-time 60 "$b/$nj" -o "$oj" 2>/dev/null \
+   && curl_common -fsSL --max-filesize 64 --retry "$tent" --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL \
+      --connect-timeout "$ct" --max-time 60 "$b/$ns" -o "$os" 2>/dev/null
+}
+# So a ASSINATURA do par json/sig pela chave pinada (contrato e anti-downgrade ficam com quem
+# chama). Serve pra ESCOLHER a origem; quem chama confere tudo de novo no par escolhido.
+par_confere() {  # <arquivo.json> <arquivo.sig>
+  local k
+  k="$(mktemp "${TMPDIR:-/tmp}/leon-par.XXXXXX")" || return 1
+  if write_release_public_key "$k" \
+     && openssl pkeyutl -verify -rawin -pubin -inkey "$k" -in "$1" -sigfile "$2" >/dev/null 2>&1; then
+    rm -f -- "$k"; return 0
+  fi
+  rm -f -- "$k"; return 1
+}
+baixa_manifesto_assinado() {  # <central> <nome.json> <nome.sig> <saida.json> <saida.sig> <max-json> <tentativas> [versao-instalada]
+  local central="$1" nj="$2" ns="$3" oj="$4" os="$5" mj="$6" tent="$7" inst="${8:-}" ve="" vc="" tj="" ts=""
+  MANIFESTO_ORIGEM=""; MANIFESTO_NOTA=""
+  if [ -n "${LEON_ESPELHO:-}" ] && baixa_par "$LEON_ESPELHO" "$nj" "$ns" "$oj" "$os" "$mj" "$tent" 20; then
+    MANIFESTO_ORIGEM=espelho
+    # PAR DO ESPELHO QUE NAO CONFERE (23/09 noite, revisor): o raw.githubusercontent guarda
+    # cache de uns 5 min POR ARQUIVO; logo depois de um push a casa pode receber o json novo com
+    # o sig velho. A central passa pela MESMA verificacao, entao tentar ela nao afrouxa nada: so
+    # troca de origem se o par da central conferir. Nao conferiu nenhum: devolve o par do
+    # espelho e quem chama reprova a assinatura (falha fechada, como antes).
+    if ! par_confere "$oj" "$os"; then
+      MANIFESTO_NOTA="espelho com assinatura invalida"
+      [ -n "$central" ] || return 0
+      tj="$(mktemp "${TMPDIR:-/tmp}/leon-man-central.XXXXXX")" || return 0
+      ts="$(mktemp "${TMPDIR:-/tmp}/leon-man-central.XXXXXX")" || { rm -f -- "$tj"; return 0; }
+      if baixa_par "$central" "$nj" "$ns" "$tj" "$ts" "$mj" 1 10 && par_confere "$tj" "$ts"; then
+        if cat -- "$tj" > "$oj" && cat -- "$ts" > "$os"; then
+          MANIFESTO_ORIGEM=central
+          MANIFESTO_NOTA="espelho com assinatura invalida (cache do GitHub?); usei a central, par conferido"
+        else
+          rm -f -- "$tj" "$ts"; return 1
+        fi
+      else
+        MANIFESTO_NOTA="espelho com assinatura invalida e a central nao entregou par valido"
+      fi
+      rm -f -- "$tj" "$ts"
+      return 0
+    fi
+    [ -n "$inst" ] && [ -n "$central" ] || return 0
+    ve="$(versao_do_manifesto "$oj")" || return 0      # ilegivel: a verificacao depois reprova
+    semver_ge "$inst" "$ve" 2>/dev/null || return 0    # o espelho ja traz versao nova: fica com ele
+    tj="$(mktemp "${TMPDIR:-/tmp}/leon-man-central.XXXXXX")" || return 0
+    ts="$(mktemp "${TMPDIR:-/tmp}/leon-man-central.XXXXXX")" || { rm -f -- "$tj"; return 0; }
+    # espelho atrasado: a central so ganha se o par dela CONFERE (central com par ruim nao
+    # derruba o espelho bom).
+    if baixa_par "$central" "$nj" "$ns" "$tj" "$ts" "$mj" 1 5 && par_confere "$tj" "$ts" \
+       && vc="$(versao_do_manifesto "$tj")" && ! semver_ge "$ve" "$vc" 2>/dev/null; then
+      if cat -- "$tj" > "$oj" && cat -- "$ts" > "$os"; then
+        MANIFESTO_ORIGEM=central
+        MANIFESTO_NOTA="espelho atrasado ($ve); a central tem $vc"
+      else
+        rm -f -- "$tj" "$ts"; return 1
+      fi
+    fi
+    rm -f -- "$tj" "$ts"
+    return 0
+  fi
+  if baixa_par "$central" "$nj" "$ns" "$oj" "$os" "$mj" "$tent" 10; then
+    MANIFESTO_ORIGEM=central
+    MANIFESTO_NOTA="o espelho no GitHub nao respondeu; usei a central de reserva"
+    return 0
+  fi
+  return 1
+}
+confere_sha_tamanho() {  # <arquivo> <sha256> <bytes>
+  "$PYTHON_BIN" - "$1" "$2" "$3" <<'PY' 2>/dev/null
+import hashlib,os,sys
+p,h,n=sys.argv[1],sys.argv[2],int(sys.argv[3])
+try:
+    if os.path.getsize(p)!=n: raise SystemExit(1)
+    d=hashlib.sha256()
+    with open(p,"rb") as f:
+        for b in iter(lambda: f.read(1<<20), b""): d.update(b)
+except OSError: raise SystemExit(1)
+raise SystemExit(0 if d.hexdigest()==h else 1)
+PY
+}
+# Artefato citado no manifesto assinado: espelho primeiro, central de reserva; so aceita o que
+# bate sha E tamanho do manifesto. Quem chama ainda roda verify_signed_artifact (dupla checagem).
+baixa_artefato_verificado() {  # <central> <rel> <destino> <max-bytes> <sha256> <bytes> <tentativas>
+  local central="$1" rel="$2" dest="$3" max="$4" sha="$5" n="$6" tent="$7" nome="${2##*/}"
+  ARTEFATO_ORIGEM=""
+  if [ -n "${LEON_ESPELHO:-}" ] && [ -n "$nome" ] \
+     && curl_common -fsSL --max-filesize "$max" --retry "$tent" --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL \
+          --connect-timeout 20 --max-time 180 "$LEON_ESPELHO/$nome" -o "$dest" 2>/dev/null \
+     && confere_sha_tamanho "$dest" "$sha" "$n"; then
+    ARTEFATO_ORIGEM=espelho; return 0
+  fi
+  if [ -n "$central" ] \
+     && curl_common -fsSL --max-filesize "$max" --retry "$tent" --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL \
+          --connect-timeout 10 --max-time 180 "$central$rel" -o "$dest" 2>/dev/null \
+     && confere_sha_tamanho "$dest" "$sha" "$n"; then
+    ARTEFATO_ORIGEM=central; return 0
+  fi
+  return 1
+}
+# LICENCA ASSINADA E PACOTE PAGO SEM VPS (23/09, item G3; flag LEON_LICENCA_ASSINADA nasce 0).
+# Espelho em bash+python do lib/licenca-assinada.cjs: a casa confere a licenca OFFLINE com a
+# chave publica da LICENCA pinada abaixo (separada da chave da release). Vazia = recurso inerte
+# ate o dono gerar a chave de producao (ferramentas/licenca/gera-chave-licenca.sh). A prova
+# confere que as copias (lib, instalador, atualizador) sao iguais. Nunca vem de variavel de ambiente.
+LEON_LICENCA_PUB_B64=''
+# Sucesso: imprime "<id>\t<valida_ate>\t<vencida 0|1>\t<chave_pacote ou ->" e sai 0.
+# Licenca na lista de revogacao (lista CONFERIDA pela mesma chave): sai 3. Invalida/ausente: 1.
+# ANTI-ROLLBACK (23/09 noite, igual ao lib/licenca-assinada.cjs): com [pasta-de-estado], a lista
+# aceita fica guardada la (licencas-revogadas.assinada, 0600) e lista com seq MENOR que a guardada
+# ou que a ultima vista pelo runtime (revogacao.seq no licenca-assinada.json) e ignorada: lista
+# velha reenviada nao "desrevoga". Os ids que o runtime ja viu revogados continuam valendo.
+licenca_confere() {  # <arquivo-da-licenca> [arquivo-da-lista-de-revogacao] [pasta-de-estado]
+  [ -n "$LEON_LICENCA_PUB_B64" ] && [ -f "$1" ] || return 1
+  "${PYTHON_BIN:-python3}" - "$1" "${2:-}" "$LEON_LICENCA_PUB_B64" "${3:-}" <<'PY'
+import base64,datetime,json,os,re,subprocess,sys,tempfile,time
+tok,rev,pub,estado=sys.argv[1:5]
+def b64u(s):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+",s): raise ValueError()
+    return base64.urlsafe_b64decode(s+"="*(-len(s)%4))
+def abre(texto,tipo):
+    p=texto.strip().split(".")
+    if len(p)!=3 or p[0]!="leon1": raise ValueError()
+    payload,sig=b64u(p[1]),b64u(p[2])
+    if len(sig)!=64: raise ValueError()
+    with tempfile.TemporaryDirectory() as t:
+        with open(t+"/k.pem","w") as f: f.write("-----BEGIN PUBLIC KEY-----\n"+pub+"\n-----END PUBLIC KEY-----\n")
+        with open(t+"/p","wb") as f: f.write(payload)
+        with open(t+"/s","wb") as f: f.write(sig)
+        r=subprocess.run(["openssl","pkeyutl","-verify","-pubin","-inkey",t+"/k.pem","-rawin","-in",t+"/p","-sigfile",t+"/s"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        if r.returncode!=0: raise ValueError()
+    d=json.loads(payload.decode("utf-8"))
+    if not isinstance(d,dict) or d.get("v")!=1 or d.get("tipo")!=tipo: raise ValueError()
+    return d
+def quando(s): return datetime.datetime.fromisoformat(str(s).replace("Z","+00:00")).timestamp()
+try:
+    raw=open(tok,encoding="utf-8").read(16385)
+    if raw.lstrip().startswith("{"): raw=json.loads(raw)["token"]
+    d=abre(raw,"leon-licenca")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}",str(d.get("id",""))) or d.get("produto")!="leon": raise ValueError()
+    ate=quando(d["valida_ate"])
+    if quando(d["emitida_em"])>ate: raise ValueError()
+    cp=d.get("chave_pacote")
+    if cp is not None and not re.fullmatch(r"[A-Za-z0-9+/]{43}=",str(cp)): raise ValueError()
+except Exception: raise SystemExit(1)
+def lista(texto):
+    r=abre(texto,"leon-revogacao")
+    s,ids=r.get("seq"),r.get("ids")
+    if isinstance(s,bool) or not isinstance(s,int) or s<1 or not isinstance(ids,list): raise ValueError()
+    return r
+nova=txt_nova=None
+if rev and os.path.isfile(rev) and os.path.getsize(rev)>0:
+    try: txt_nova=open(rev,encoding="utf-8").read(1048577); nova=lista(txt_nova)
+    except Exception: nova=None   # lista ilegivel ou adulterada nao revoga nem libera
+guardada=None; gpath=os.path.join(estado,"licencas-revogadas.assinada") if estado else ""
+if gpath and os.path.isfile(gpath):
+    try: guardada=lista(open(gpath,encoding="utf-8").read(1048577))
+    except Exception: guardada=None
+seq_rt=0; ids_rt=[]
+try:
+    j=json.load(open(tok,encoding="utf-8")); rj=j.get("revogacao") or {}
+    if isinstance(rj.get("seq"),int) and not isinstance(rj.get("seq"),bool): seq_rt=rj["seq"]
+    if isinstance(rj.get("ids"),list): ids_rt=[x for x in rj["ids"] if isinstance(x,str)]
+except Exception: pass
+piso=max(guardada["seq"] if guardada else 0, seq_rt)
+vale=guardada
+if nova is not None:
+    if nova["seq"]>=piso:
+        vale=nova
+        if gpath and (guardada is None or nova["seq"]>guardada["seq"]):
+            try:
+                fd,t=tempfile.mkstemp(dir=estado,prefix=".revogadas.")
+                with os.fdopen(fd,"w",encoding="utf-8") as f: f.write(txt_nova)
+                os.chmod(t,0o600); os.replace(t,gpath)
+            except Exception: pass
+    else:
+        print(f"lista de revogacao velha (seq {nova['seq']} < {piso}); ignorada",file=sys.stderr)
+if (vale and d["id"] in vale["ids"]) or d["id"] in ids_rt: raise SystemExit(3)
+print(f'{d["id"]}\t{d["valida_ate"]}\t{1 if time.time()>ate else 0}\t{cp or "-"}')
+PY
+}
+# Lista de revogacao: GitHub primeiro, central de reserva. Arquivo vazio = nenhuma lista (a
+# licenca vale pelo que ela mesma diz). Quem le confere a assinatura (licenca_confere).
+baixa_revogacao() {  # <central> <destino>
+  : > "$2" 2>/dev/null || return 1
+  { [ -n "${LEON_ESPELHO:-}" ] && curl_common -fsSL --max-filesize 1048576 --retry 2 --retry-delay 2 --connect-timeout 10 --max-time 30 \
+      "$LEON_ESPELHO/licencas-revogadas.txt" -o "$2" 2>/dev/null; } \
+  || { [ -n "$1" ] && curl_common -fsSL --max-filesize 1048576 --retry 1 --connect-timeout 5 --max-time 20 \
+      "$1/licencas-revogadas.txt" -o "$2" 2>/dev/null; } \
+  || : > "$2"
+  return 0
+}
+# PACOTE PAGO CIFRADO NO ESPELHO. O espelho publico guarda <arquivo>.cifrado: o pacote pago em
+# AES-256-CBC (PBKDF2) com a chave_pacote, que so viaja DENTRO da licenca assinada. Sem licenca,
+# bytes inuteis. A integridade nao depende da cifra: sha256 e tamanho do pacote EM CLARO estao
+# pinados no manifesto assinado e so o que bate entra.
+pacote_cifrado_do_espelho() {  # <nome> <sha256> <bytes> <destino> <chave-b64>
+  local nome="$1" sha="$2" n="$3" dest="$4" chave="$5" c
+  [ -n "${LEON_ESPELHO:-}" ] && [ -n "$chave" ] && [ "$chave" != "-" ] || return 1
+  c="$(mktemp "${TMPDIR:-/tmp}/leon-cifrado.XXXXXX")" || return 1
+  if curl_common -fsSL --max-filesize "$((n + 4096))" --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 180 \
+       "$LEON_ESPELHO/$nome.cifrado" -o "$c" 2>/dev/null \
+     && printf '%s\n' "$chave" | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -md sha256 -pass stdin -in "$c" -out "$dest" 2>/dev/null \
+     && confere_sha_tamanho "$dest" "$sha" "$n"; then
+    rm -f -- "$c"; return 0
+  fi
+  rm -f -- "$c"; : > "$dest" 2>/dev/null
+  return 1
+}
+# COPIA GUARDADA DO PACOTE PAGO: todo pacote conferido fica em LEON_CACHE_PACOTES (0600, nome =
+# sha256). Enquanto o pacote nao muda (o base nao muda desde a 2.4.45), o /atualiza nao precisa
+# da central pra ele. Guarda no maximo 3 (a casa nao vira deposito).
+# A central "nao respondeu" (e nao "recusou")? 0 = fora: sem codigo, transferencia quebrada,
+# 408, 429 ou qualquer 5xx (o Cloudflare na frente da VPS devolve 520 a 530 com ela fora).
+# Recusa explicita (401, 402, 403, 404) e qualquer outro codigo nao sao "fora".
+central_fora_http() {  # <http_code> <curl_rc>
+  case "${1:-000}" in
+    000|408|429|5[0-9][0-9]) return 0 ;;
+    200) [ "${2:-0}" != 0 ] ;;
+    *) return 1 ;;
+  esac
+}
+pacote_do_cache() {  # <sha256> <bytes> <destino>
+  local f="${LEON_CACHE_PACOTES:-}/$1"
+  [ -n "${LEON_CACHE_PACOTES:-}" ] && [ -f "$f" ] && [ ! -L "$f" ] && confere_sha_tamanho "$f" "$1" "$2" \
+    && cat -- "$f" > "$3" && confere_sha_tamanho "$3" "$1" "$2"
+}
+guarda_pacote_no_cache() {  # <arquivo> <sha256>
+  [ -n "${LEON_CACHE_PACOTES:-}" ] || return 0
+  ( umask 077
+    mkdir -p -- "$LEON_CACHE_PACOTES" && chmod 0700 -- "$LEON_CACHE_PACOTES" \
+      && cp -- "$1" "$LEON_CACHE_PACOTES/.$2.novo" && mv -f -- "$LEON_CACHE_PACOTES/.$2.novo" "$LEON_CACHE_PACOTES/$2" \
+      && ls -1t -- "$LEON_CACHE_PACOTES" | grep -E '^[0-9a-f]{64}$' | tail -n +4 | while read -r v; do rm -f -- "$LEON_CACHE_PACOTES/$v"; done
+  ) 2>/dev/null || true
 }
 
 # --- LEON-STAGE0-BEGIN (contrato: esta string nunca sai do arquivo) -----------
@@ -463,11 +1769,11 @@ if [ "$FINALIZE_MODE" -eq 0 ] && [ -z "${LEON_UPDATE_BLINDADO:-}" ] \
   # vir com aspas ou comentario (.env editado a mao): normaliza como o env_get_from.
   S0_RAW="$(safe_env_value "$INSTALL_DIR/.env" LEON_LICENSE_CENTRAL 2>/dev/null)" || S0_RAW="__S0_ENV_INVALIDO__"
   if [ "$S0_RAW" = "__S0_ENV_INVALIDO__" ]; then
-    grep -qE '^LEON_LICENSE_CENTRAL=' "$INSTALL_DIR/.env" 2>/dev/null \
+    leon_preserva env-valor "$INSTALL_DIR/.env" LEON_LICENSE_CENTRAL >/dev/null 2>&1 \
       && s0_die ".env fora do padrão (permissão não é 0600, dono errado ou chave repetida)" "a configuração da instalação está com permissão ou formato errado." \
       || s0_die "LEON_LICENSE_CENTRAL ausente no .env" "a configuração da instalação não diz qual é a central."
   fi
-  S0_CENTRAL="$(printf '%s' "$S0_RAW" | sed 's/[[:space:]]*#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//')"
+  S0_CENTRAL="$S0_RAW"   # ja sai como o bridge le (leon_preserva env-valor-seguro)
   case "$S0_CENTRAL" in
     https://*) ;;
     "") s0_die "LEON_LICENSE_CENTRAL vazio no .env" "a configuração da instalação está com o endereço da central em branco." ;;
@@ -477,12 +1783,13 @@ if [ "$FINALIZE_MODE" -eq 0 ] && [ -z "${LEON_UPDATE_BLINDADO:-}" ] \
   S0_SIG="$(mktemp "${TMPDIR:-/tmp}/leon-stage0.XXXXXX.sig")"   || s0_die "mktemp falhou" "não consegui criar arquivo temporário (disco cheio?)."
   S0_PUB="$(mktemp "${TMPDIR:-/tmp}/leon-stage0.XXXXXX.pem")"   || s0_die "mktemp falhou" "não consegui criar arquivo temporário (disco cheio?)."
   S0_META="$(mktemp "${TMPDIR:-/tmp}/leon-stage0.XXXXXX.env")"  || s0_die "mktemp falhou" "não consegui criar arquivo temporário (disco cheio?)."
-  s0_log "buscando o atualizador assinado em $S0_CENTRAL"
-  curl_common -fsSL --max-filesize 524288 --retry 3 --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL \
-      --connect-timeout 20 --max-time 60 "$S0_CENTRAL/release-manifest.json" -o "$S0_MAN" \
-   && curl_common -fsSL --max-filesize 64 --retry 3 --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL \
-      --connect-timeout 20 --max-time 60 "$S0_CENTRAL/release-manifest.sig" -o "$S0_SIG" \
-   || s0_die "download do manifesto falhou (rede/central)" "não consegui baixar a atualização agora (a central não respondeu). Tente /atualiza mais tarde."
+  # versao instalada ANTES do download: decide se o espelho esta atrasado (baixa_manifesto_assinado)
+  S0_ID="$(read_installed_release_identity "$INSTALL_DIR" 2>/dev/null)" || S0_ID=$'0.0.0\t'
+  IFS=$'\t' read -r S0_INST_VER S0_INST_DIG <<< "$S0_ID"
+  s0_log "buscando o atualizador assinado no espelho ($LEON_ESPELHO), central de reserva $S0_CENTRAL"
+  baixa_manifesto_assinado "$S0_CENTRAL" release-manifest.json release-manifest.sig "$S0_MAN" "$S0_SIG" 524288 3 "${S0_INST_VER:-0.0.0}" \
+   || s0_die "download do manifesto falhou no espelho ($LEON_ESPELHO) e na central" "não consegui baixar a atualização agora: nem o GitHub nem a central responderam. Tente /atualiza mais tarde."
+  s0_log "manifesto assinado baixado; origem=$MANIFESTO_ORIGEM${MANIFESTO_NOTA:+ ($MANIFESTO_NOTA)}"
   validate_download_file "$S0_MAN" 524288 && validate_download_file "$S0_SIG" 64 64 \
    || s0_die "manifesto/assinatura fora do contrato de transporte" "a atualização servida veio fora do padrão."
   s0_verify_manifest "$S0_MAN" "$S0_SIG" "$S0_PUB" "$S0_META" \
@@ -490,15 +1797,13 @@ if [ "$FINALIZE_MODE" -eq 0 ] && [ -z "${LEON_UPDATE_BLINDADO:-}" ] \
   # shellcheck disable=SC1090
   . "$S0_META"   # version, updater_sha256, updater_bytes, updater_url (url fixa, ja validada)
   S0_MAN_SHA="$(sha256sum "$S0_MAN" | awk '{print $1}')" || s0_die "sha256sum do manifesto falhou" "não consegui conferir a atualização."
-  S0_ID="$(read_installed_release_identity "$INSTALL_DIR" 2>/dev/null)" || S0_ID=$'0.0.0\t'
-  IFS=$'\t' read -r S0_INST_VER S0_INST_DIG <<< "$S0_ID"
   release_identity_acceptable "$version" "$S0_MAN_SHA" "${S0_INST_VER:-0.0.0}" "${S0_INST_DIG:-}" \
-   || s0_die "central serve $version, instalada ${S0_INST_VER:-?} (digest ${S0_INST_DIG:-sem}): recusado por downgrade/replay" "a central está servindo uma versão que não posso aplicar por cima da instalada (mais antiga, ou a mesma com assinatura diferente)."
+   || s0_die "origem=$MANIFESTO_ORIGEM serve $version, instalada ${S0_INST_VER:-?} (digest ${S0_INST_DIG:-sem}): recusado por downgrade/replay" "a atualização servida é uma versão que não posso aplicar por cima da instalada (mais antiga, ou a mesma com assinatura diferente)."
   # nome casa o cleanup do corpo (leon-update.*) e NAO contem 'update-pago.sh'.
   S0_CAND="$(mktemp "${TMPDIR:-/tmp}/leon-update.XXXXXX")" || s0_die "mktemp falhou" "não consegui criar arquivo temporário (disco cheio?)."
-  curl_common -fsSL --max-filesize "$((updater_bytes + 1))" --retry 3 --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL \
-      --connect-timeout 20 --max-time 180 "$S0_CENTRAL$updater_url" -o "$S0_CAND" \
-   || s0_die "download do atualizador falhou (rede/central)" "não consegui baixar a atualização agora. Tente /atualiza mais tarde."
+  baixa_artefato_verificado "$S0_CENTRAL" "$updater_url" "$S0_CAND" "$((updater_bytes + 1))" "$updater_sha256" "$updater_bytes" 3 \
+   || s0_die "download do atualizador falhou (espelho e central, ou sha diferente do manifesto)" "não consegui baixar a atualização agora. Tente /atualiza mais tarde."
+  s0_log "atualizador baixado; origem=$ARTEFATO_ORIGEM"
   verify_signed_artifact "$S0_CAND" "$updater_sha256" "$updater_bytes" "atualizador"
   # literal partido de proposito: o inteiro nunca pode existir neste arquivo.
   S0_FLAG="--dangerously-bypass-approvals-and-"'sandbox'
@@ -513,7 +1818,7 @@ if [ "$FINALIZE_MODE" -eq 0 ] && [ -z "${LEON_UPDATE_BLINDADO:-}" ] \
   rm -f -- "$S0_MAN" "$S0_SIG" "$S0_PUB" "$S0_META" 2>/dev/null || true
   S0_MAN=""; S0_SIG=""; S0_PUB=""; S0_META=""
   trap - EXIT INT TERM
-  s0_log "atualizador $version (${updater_sha256:0:12}) conferido: assinatura, sha, tamanho, sintaxe; passando o comando"
+  s0_log "atualizador $version (${updater_sha256:0:12}) conferido: assinatura, sha, tamanho, sintaxe; origem=$MANIFESTO_ORIGEM; passando o comando"
   export LEON_INSTALL_DIR="$INSTALL_DIR" LEON_UPDATE_BLINDADO=1 LEON_UPDATE_COPIA="$S0_CAND"
   exec /usr/bin/env bash "$S0_CAND" "$@"
 fi
@@ -987,113 +2292,27 @@ try:
   "RestrictRealtime":"true","ProtectKernelTunables":"true","ProtectKernelModules":"true",
   "ProtectControlGroups":"true","PrivateDevices":"true","CapabilityBoundingSet":"",
   "AmbientCapabilities":"","SystemCallArchitectures":"native","TasksMax":"512",
-  "MemoryHigh":"80%","MemoryMax":"90%","NoNewPrivileges":"true",
+  "MemoryMax":"90%","NoNewPrivileges":"true",
  }
  for key,value in required.items(): one(key,value)
+ # contencao de memoria (25/09): a unit antiga (MemoryHigh=80%, sem teto de swap) segue
+ # aceita pra casa que ainda nao reinstalou; a nova vem inteira ou nao vale (sem mistura).
+ perfil_antigo={"MemoryHigh":["80%"],"MemorySwapMax":None,"OOMPolicy":None}
+ perfil_novo={"MemoryHigh":["infinity"],"MemorySwapMax":["1G"],"OOMPolicy":["continue"]}
+ if not any(all(values.get(k)==v for k,v in perfil.items()) for perfil in (perfil_antigo,perfil_novo)): raise ValueError()
 except Exception: raise SystemExit(1)
 PY
 }
 
-prepare_smoke_codex_home() {
-  local source_home="$1" config_candidate="$2" destination="$3"
-  "$PYTHON_BIN" - "$source_home" "$config_candidate" "$destination" <<'PY'
-import os,stat,sys
-source_home,config,destination=map(os.path.abspath,sys.argv[1:])
-def safe_read(path,cap,owner):
- seen=os.lstat(path)
- if not stat.S_ISREG(seen.st_mode) or seen.st_nlink!=1 or seen.st_size>cap: raise ValueError()
- if seen.st_uid!=owner or stat.S_IMODE(seen.st_mode)&0o077: raise ValueError()
- fd=os.open(path,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0))
- try: before=os.fstat(fd); raw=os.read(fd,cap+1); after=os.fstat(fd)
- finally: os.close(fd)
- if (seen.st_dev,seen.st_ino)!=(before.st_dev,before.st_ino): raise ValueError()
- if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or len(raw)!=before.st_size: raise ValueError()
- if (before.st_dev,before.st_ino,before.st_size)!=(after.st_dev,after.st_ino,after.st_size) or after.st_nlink!=1: raise ValueError()
- return raw
-uid=os.getuid()
-auth=safe_read(os.path.join(source_home,"auth.json"),2*1024*1024,uid)
-cfg=safe_read(config,256*1024,uid)
-if os.path.lexists(destination): raise ValueError()
-os.mkdir(destination,0o700)
-for name,raw in (("auth.json",auth),("config.toml",cfg)):
- path=os.path.join(destination,name)
- fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
- try: os.write(fd,raw); os.fsync(fd)
- finally: os.close(fd)
-dirfd=os.open(destination,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0))
-try: os.fsync(dirfd)
-finally: os.close(dirfd)
-PY
-}
-
-# BAIXA COM ESPELHO (23/08, lei do dono: "o LEON deles deveria atualizar independente").
-# A central do dono era ponto unico de falha: VPS fora = frota inteira sem atualizar,
-# inclusive quem paga. Agora: tenta a central; se ela nao responde, cai pro espelho
-# publico no GitHub. A SEGURANCA NAO MUDA: todo artefato e conferido por sha256 e pelo
-# manifesto assinado depois do download, venha de onde vier. O que exige licenca (a base
-# do produto) continua SO na central: o espelho serve apenas o que ja e livre.
-LEON_ESPELHO="${LEON_ESPELHO:-https://raw.githubusercontent.com/molinateston/leon-espelho/main}"
-baixa_com_espelho() {  # baixa_com_espelho <caminho-na-central> <destino> <max-bytes>
-  local rel="$1" dest="$2" max="$3"
-  # 02/set (blindagem do /atualiza pra escala): o /atualiza é o canal de conserto remoto e não
-  # pode morrer por soluço de rede. Antes: --retry só cobria conexão-recusada e não havia
-  # --connect-timeout. Agora: --retry-all-errors (cobre 5xx/429 momentâneo da central), --retry 4,
-  # --connect-timeout 20 (não fica pendurado tentando conectar). A segurança é o sha+assinatura
-  # DEPOIS do download — insistir no download não afrouxa nada.
-  if curl -fsSL --max-filesize "$max" --retry 4 --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL \
-      --connect-timeout 20 --max-time 180 "$CENTRAL$rel" -o "$dest" 2>/dev/null; then
-    return 0
-  fi
-  # central fora: o espelho publico assume. O nome do arquivo e o mesmo dos dois lados.
-  local nome="${rel##*/}"
-  if [ -n "$nome" ] && curl -fsSL --max-filesize "$max" --retry 4 --retry-delay 2 $CURL_RETRY_ALL \
-      --connect-timeout 20 --max-time 180 "$LEON_ESPELHO/$nome" -o "$dest" 2>/dev/null; then
-    say "   (a central nao respondeu; peguei do espelho publico)"
-    return 0
-  fi
-  return 1
-}
-
-run_candidate_model_smoke() {
-  local live="$1" tx="$2" status=0
-  [ "$TEST_MODE" != "1" ] || return 0
-  MODEL_SMOKE_HOME="$(mktemp -d "$LEON_TMPDIR/.codex-home-smoke-$TX_ID.XXXXXX")"
-  rmdir -- "$MODEL_SMOKE_HOME"
-  MODEL_SMOKE_DIR="$LEON_WORK_AREA/.leon-update-smoke-$TX_ID"
-  MODEL_SMOKE_OUT="$(mktemp "$LEON_TMPDIR/.appserver-smoke-$TX_ID.XXXXXX")"
-  prepare_smoke_codex_home "$CODEX_HOME_DIR" "$tx/config.candidate" "$MODEL_SMOKE_HOME" || status=1
-  if [ "$status" -eq 0 ]; then
-    mkdir -m 0700 "$MODEL_SMOKE_DIR"
-    # 02/set: teto de tempo no smoke. Se o login vencido PENDURAR a conexão (em vez de dar erro
-    # rápido), sem isto o /atualiza ficava travado esperando. timeout 90 = o smoke "falha rápido"
-    # e, como agora ele é só aviso (não veto), o update segue e o dono é avisado pra renovar login.
-    if ! timeout 90 env PATH="$(dirname "$NODE_BIN"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-      CODEX_HOME="$MODEL_SMOKE_HOME" LEON_CODEX_HOME="$MODEL_SMOKE_HOME" CODEX_BIN="$CODEX_BIN_PATH" \
-      CODEX_MODEL="${CODEX_MODEL_EFETIVO:-gpt-5.6-sol}" LEON_RUNTIME_DIR="$live" LEON_SMOKE_DIR="$MODEL_SMOKE_DIR" \
-      "$NODE_BIN" "$live/smoke/appserver-smoke.cjs" >"$MODEL_SMOKE_OUT" 2>&1; then
-      status=1
-    elif ! "$PYTHON_BIN" - "$MODEL_SMOKE_OUT" "${CODEX_MODEL_EFETIVO:-gpt-5.6-sol}" <<'PY'
-import json,sys
-try:
- lines=[line for line in open(sys.argv[1],encoding="utf-8") if line.strip()]
- data=json.loads(lines[-1])
- if data!={"ok":True,"persistentSession":True,"model":sys.argv[2]}: raise ValueError()
-except Exception: raise SystemExit(1)
-PY
-    then status=1
-    fi
-  fi
-  rm -rf -- "$MODEL_SMOKE_HOME" "$MODEL_SMOKE_DIR"
-  rm -f -- "$MODEL_SMOKE_OUT"
-  MODEL_SMOKE_HOME=""; MODEL_SMOKE_DIR=""; MODEL_SMOKE_OUT=""
-  return "$status"
-}
+# BAIXA COM ESPELHO (23/08) aposentada em 23/09: a ordem inverteu (GitHub primeiro, central de
+# reserva) e o download passou a conferir sha e tamanho do manifesto antes de aceitar a origem.
+# Ver baixa_artefato_verificado, na cabeca do arquivo.
 
 normalize_agent_base() {
   local agent_base="$1" skills_dir="$2"
   [ -f "$agent_base" ] || return 0
   "$PYTHON_BIN" - "$agent_base" "$skills_dir" "$INSTALL_DIR" "$LEON_TMPDIR" "$CODEX_HOME_DIR" \
-    "$LEON_DATA_DIR/brain" "$LEON_WORK_AREA" "$LEON_MISSION_OUTPUT_DIR" <<'PY'
+    "$BRAIN_DIR" "$LEON_WORK_AREA" "$LEON_MISSION_OUTPUT_DIR" <<'PY'
 import os, re, sys
 
 path, skills_dir, install_dir, tmp_dir, codex_home, brain_dir, work_area, mission_output_dir = sys.argv[1:]
@@ -1299,9 +2518,30 @@ PY
 # precisam CONCORDAR; qualquer outra combinacao e 'indeterminada' e vira recusa
 # nomeada ANTES de mutar (um bridge transicional com os dois literais nao pode
 # ser chutado para nenhum lado).
+# LEON 2.0 (2.7.0): o bridge.cjs da casa e a PORTA que carrega leon2/leon.cjs (tres linhas, gerada pelo
+# gerar-pacote-cliente.sh). A unit, a validacao da unit e o portao do zero seguem iguais; o que muda e
+# o que se confere dentro da casa: leon2/ no lugar do bridge antigo.
+bridge_e_leon2() {  # bridge_e_leon2 <bridge.cjs>
+  [ -f "$1" ] && [ ! -L "$1" ] && [ "$(wc -c < "$1")" -lt 4096 ] \
+    && LC_ALL=C grep -q "^require('./leon2/leon.cjs');\$" -- "$1" 2>/dev/null \
+    && [ -s "$(dirname "$1")/leon2/leon.cjs" ]
+}
+# node --check do 2.0 inteiro (porta, leon.cjs e as libs) numa casa ou stage.
+leon2_sintaxe_ok() {  # leon2_sintaxe_ok <runtime>
+  local f
+  "$NODE_BIN" --check "$1/leon2/leon.cjs" >/dev/null 2>&1 || return 1
+  for f in "$1"/leon2/lib/*.cjs "$1"/leon2/bin/*; do
+    [ -f "$f" ] || return 1
+    "$NODE_BIN" --check "$f" >/dev/null 2>&1 || return 1
+  done
+}
+
 familia_do_bridge() {
   local arquivo="$1" tem_fn=0 tem_uso=0 tem_legado=0
   if [ ! -f "$arquivo" ] || [ -L "$arquivo" ]; then printf 'indeterminada\n'; return 0; fi
+  # O 2.0 le as conversas onde a familia nova le (LEON_SESSIONS_FILE, senao LEON_STATE_DIR/sessions.json),
+  # entao a porta e da familia nova, nos dois sentidos (2.6 -> 2.0 e a volta 2.0 -> 2.6).
+  if bridge_e_leon2 "$arquivo"; then printf 'nova\n'; return 0; fi
   if LC_ALL=C grep -q 'function _resolveSessionsFile(' -- "$arquivo" 2>/dev/null; then tem_fn=1; fi
   if LC_ALL=C grep -Eq 'SESS_FILE[[:space:]]*=[[:space:]]*_resolveSessionsFile\(\)' -- "$arquivo" 2>/dev/null; then tem_uso=1; fi
   if LC_ALL=C grep -Eq 'SESS_FILE[[:space:]]*=[[:space:]]*`\$\{WORKDIR\}/sessions\.json`' -- "$arquivo" 2>/dev/null; then tem_legado=1; fi
@@ -1380,36 +2620,6 @@ if os.path.dirname(alvo)!=os.path.normpath(os.path.abspath(raiz)): raise SystemE
 PY
 }
 
-# Transforma as linhas ATIVAS de UMA chave em comentario "#LEON-GUARDADO <motivo>",
-# sem perder o valor e sem tocar em mais nada do arquivo. Usado quando a chave do
-# cliente derrubaria o boot do runtime novo: guardar e sempre melhor que abortar o
-# update (que congela a casa) ou apagar a linha (que perde a configuracao dele).
-# MOTIVO 'migrado' de proposito NAO entra no PRE de filter_user_env: a linha fica
-# guardada pra sempre, porque revive-la voltaria a derrubar o boot.
-env_guarda_chave() {
-  "$PYTHON_BIN" - "$1" "$2" "$3" <<'PY'
-import os,re,sys
-arquivo,chave,motivo=sys.argv[1:]
-if not re.fullmatch(r"[A-Z][A-Z0-9_]*",chave): raise SystemExit(1)
-if not re.fullmatch(r"[a-z][a-z-]*",motivo): raise SystemExit(1)
-RE=re.compile(r"\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*")
-linhas=open(arquivo,encoding="utf-8").read().splitlines()
-saida=[];tocou=0
-for l in linhas:
-    m=RE.fullmatch(l) if (l.strip() and not l.lstrip().startswith("#")) else None
-    if m and m.group(1)==chave:
-        saida.append("#LEON-GUARDADO "+motivo+" "+l); tocou+=1
-    else:
-        saida.append(l)
-if not tocou: raise SystemExit(4)
-temp=arquivo+".guarda-new"
-fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
-try: os.write(fd,"".join(x+"\n" for x in saida).encode()); os.fsync(fd)
-finally: os.close(fd)
-os.replace(temp,arquivo)
-PY
-}
-
 # Pre-voo do arquivo migrado: o mesmo predicado que _resolveSessionsFile aplica
 # no boot. Reprovar aqui e fatal ANTES do 'committed', com rollback_inline
 # desfazendo os dois renames e sem nenhum restart.
@@ -1427,227 +2637,46 @@ if os.geteuid()!=0 and (d.st_uid!=os.getuid() or f.st_uid!=os.getuid()): raise S
 PY
 }
 
-# ---- .ENV DO CLIENTE: PRESERVAR, NUNCA APAGAR (17/09) ----------------------
-# POR QUE ISTO MUDOU: ate hoje filter_user_env mantinha SO os ~40 nomes da lista
-# fixa abaixo e DESCARTAVA todo o resto do .env. Chave de integracao que o cliente
-# configurou (Notion, Cakto, Zernio, Apify, Meta, OpenAI, Google) nao esta nessa
-# lista, entao cada /atualiza do cron apagava a integracao do cliente em silencio,
-# com log verde. Medido na bancada em 18/09: 6 de 6 chaves plantadas sumiram.
-# A LEI DO DONO: quem atualiza ou reinstala NAO perde integracao, brain nem contexto.
-#
-# A REGRA NOVA e a MESMA do instalador consertado (escreve_env_preservando):
-#   - quem responde "o bridge aceita esta chave?" e o PROPRIO bridge que vai subir,
-#     o do STAGE, por allowlistCliente()/manifestoAllowlist() de lib/integracoes.cjs.
-#     A lista NAO e copiada para ca: ela fica onde ja e mantida e o updater pergunta.
-#   - chave aceita fica ATIVA com o valor intacto.
-#   - chave que o bridge NAO aceita vira COMENTARIO "#LEON-GUARDADO ... CHAVE=valor".
-#     A allowlist do bridge e tudo-ou-nada (uma chave desconhecida recusa o .env
-#     INTEIRO e a casa nao sobe), entao guardar e o unico jeito de nao perder o valor
-#     sem derrubar o boot. Comentario o bridge pula.
-#   - a marca sai ANTES de decidir: chave que o bridge aprendeu desde o ultimo
-#     update volta sozinha para ativa no update seguinte.
-#   - chave do BLOCO GERENCIADO e descartada da cauda: o bloco vence e escreve de novo
-#     (nunca duplicar chave, que o bridge tambem recusa).
-#   - linha repetida, linha fora do formato e valor invalido tambem viram GUARDADO em
-#     vez de derrubar o update: preservar e sempre melhor que apagar ou abortar.
-#   - sem node ou sem lib/integracoes.cjs no stage, a lista fixa ainda vale como
-#     "aceita" e TODO o resto vai para GUARDADO. Nenhum caminho apaga linha do cliente.
-
-# Pergunta ao bridge do STAGE, chave por chave, se ele aceita. E o mesmo has() que o
-# boot usa, entao chave de conta declarada por FORMA (padroes[]) responde certo tambem.
-bridge_env_verdict() {
-  local lib="$1" perfil="$2" chaves="$3" saida="$4" obra js rc
-  [ -n "$NODE_BIN" ] || return 1
-  [ -f "$lib" ] || return 1
-  [ -s "$chaves" ] || return 1
-  # mktemp com sufixo depois dos X nao e portavel: diretorio proprio e o jeito seguro.
-  obra="$(mktemp -d "${TMPDIR:-/tmp}/leon-allow.XXXXXX")" || return 1
-  js="$obra/verdict.cjs"
-  cat > "$js" <<'JS'
-'use strict';
-const fs = require('fs');
-const [lib, perfil, entrada] = process.argv.slice(2);
-const integ = require(lib);
-const lista = perfil === 'dono' ? integ.manifestoAllowlist() : integ.allowlistCliente();
-if (!lista || typeof lista.has !== 'function' || !(lista.size > 0)) process.exit(1);
-const chaves = fs.readFileSync(entrada, 'utf8').split('\n').filter(Boolean);
-process.stdout.write(chaves.map((k) => (lista.has(k) ? '1 ' : '0 ') + k).join('\n') + '\n');
-JS
-  "$NODE_BIN" "$js" "$lib" "$perfil" "$chaves" > "$saida" 2>/dev/null
-  rc=$?
-  rm -rf -- "$obra"
-  [ "$rc" = 0 ] && [ -s "$saida" ]
-}
-
-# filter_user_env ORIGEM DESTINO [ARQUIVO_DE_NOMES_GERENCIADOS] [LIB_INTEGRACOES] [TOLERANTE]
-# Deixa em DESTINO.guardadas os NOMES (nunca valores) do que ficou em quarentena.
-#
-# TOLERANTE=1 (23/09, prova de preservacao 2.6.7 -> 2.6.8 na bancada): o bridge que vai subir
-# ja NAO recusa o .env por chave fora da allowlist (readSafeEnvFile guarda so o NOME e nao
-# exporta a chave a processo nenhum; LEON_ENV_ESTRITO=1 volta a recusa). Com esse bridge a
-# premissa "tudo-ou-nada" acima nao vale mais, e comentar a chave do dono so tirava a
-# integracao dele do ar: a rotina do dono que le o .env (cron, script, MCP) perdia a chave
-# em silencio a cada /atualiza. Medido na bancada: 8 de 8 chaves de integracao plantadas
-# viraram comentario na troca 2.6.7 -> 2.6.8. Tolerante, a chave fora da allowlist fica
-# ATIVA com o valor intacto, e a guardada antiga por esse motivo volta a ativa. Repetida,
-# fora do formato e valor invalido continuam guardadas: essas o bridge ainda recusa.
-filter_user_env() {
-  local source="$1" destination="$2" managed="${3:-}" lib="${4:-}" tolerante="${5:-0}"
-  local obra perfil verdict
-  obra="$(mktemp -d "${TMPDIR:-/tmp}/leon-env.XXXXXX")" || return 1
-  "$PYTHON_BIN" - "$source" "$obra/chaves" "$obra/perfil" <<'PY' || { rm -rf -- "$obra"; return 1; }
-import re,sys
-source,saida_chaves,saida_perfil=sys.argv[1:]
-PRE=re.compile(r"^#LEON-GUARDADO (?:fora-da-allowlist|repetida|formato|valor|superada) ")
-RE=re.compile(r"\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*")
-cand=[PRE.sub("",l,count=1) for l in open(source,encoding="utf-8").read().splitlines()]
-chaves=[];vistas=set()
-for l in cand:
-    if not l.strip() or l.lstrip().startswith("#"): continue
-    m=RE.fullmatch(l)
-    if not m: continue
-    k=m.group(1)
-    if k not in vistas: vistas.add(k); chaves.append(k)
-open(saida_chaves,"w",encoding="utf-8").write("".join(k+"\n" for k in chaves))
-peek=re.compile(r"""^\s*LEON_ALLOWLIST_FULL\s*=\s*["']?1["']?\s*(?:#.*)?$""",re.M)
-open(saida_perfil,"w",encoding="utf-8").write(("dono" if peek.search("\n".join(cand)) else "cliente")+"\n")
-PY
-  perfil="$(cat "$obra/perfil" 2>/dev/null || echo cliente)"
-  verdict=""
-  if [ -n "$lib" ] && bridge_env_verdict "$lib" "$perfil" "$obra/chaves" "$obra/verdict"; then
-    verdict="$obra/verdict"
-  fi
-  "$PYTHON_BIN" - "$source" "$destination" "${managed:-}" "$verdict" "$tolerante" <<'PY' || { rm -rf -- "$obra"; return 1; }
-import os,re,sys
-source,destination,managed_file,verdict_file,tolerante=sys.argv[1:]
-tolerante=(tolerante=="1")
-allowed={
- "TELEGRAM_BOT_TOKEN","OWNER_CHAT_ID","GROUP_CHAT_ID","ALLOWED_SENDERS",
- "LEON_LICENSE_EMAIL","LEON_LICENSE_KEY","LEON_LICENSE_CENTRAL","LEON_MACHINE_ID","AGENT_NAME","AGENT_GENDER",
- "EDGE_TTS_VOICE","TTS_VOICE","TTS_MODEL",
- "ELEVENLABS_API_KEY","ELEVENLABS_VOICE_ID","ELEVENLABS_MODEL_ID","ELEVENLABS_STABILITY",
- "ELEVENLABS_SIMILARITY","ELEVENLABS_STYLE","HOSTINGER_API_TOKEN","HOSTINGER_VM_ID",
- "DEBOUNCE_MS","DEBOUNCE_MAX","MAX_CONCURRENT","TETO_ADAPTATIVO","MAX_FILE_MB","MISSAO_CAP_MIN",
- "MISSAO_STALL_MIN","MISSAO_MAX_RETRIES","MISSAO_RETAIN_DAYS",
- "MISSAO_GATE_MIN","TMP_RETENTION_MS","MEMVIVA_READ_MAX",
- "MEMVIVA_ROTATE_AT","ASSUNTOS_READ_MAX","HEARTBEAT_SEG","AVISO_PESADA_SEG","TZ",
- # A2 (revisao Astra 17/09): a allowlist EFETIVA do bridge nao e so a da lib. O
- # proprio bridge.cjs acrescenta chaves DEPOIS de montar a lista (bridge.cjs:98-99,
- # ALLOWED_ENV_KEYS.add). Perguntar so a lib devolve uma lista MENOR que a do bridge
- # que vai subir, e a chave valida do cliente virava comentario: com
- # LEON_TURN_RETENTION_DAYS=365 guardada, o bridge assume 30 dias no boot seguinte e
- # a limpeza come registro que o cliente mandou preservar. A allowlist efetiva aqui e
- # UNIAO: resposta da lib + esta lista fixa + os nomes abaixo. Cinto pra casa que
- # receber runtime cuja lib ainda nao conhece esses nomes; quando a lib passar a
- # conhece-los, a uniao continua certa (nomes repetidos nao fazem mal).
- "LEON_TURN_REGISTRY","LEON_TURN_RETENTION_DAYS",
- # DRAIN_SEG saiu da allowlist de user-env e virou chave GERENCIADA (11/09, cura dos 74
- # "adapter closed"): o updater re-grava DRAIN_SEG=300 no bloco comum abaixo, garantindo que
- # TODA casa (inclusive as ja vivas, que nunca tiveram a chave) drene ate 300s no restart do
- # /atualiza em vez dos 75s que matavam turno de missao longa no meio.
-}
-managed=set()
-if managed_file and os.path.exists(managed_file):
-    managed={l.strip() for l in open(managed_file,encoding="utf-8") if l.strip()}
-aceita=None
-if verdict_file and os.path.exists(verdict_file):
-    aceita=set()
-    for l in open(verdict_file,encoding="utf-8").read().splitlines():
-        if l[:2]=="1 ": aceita.add(l[2:])
-PRE=re.compile(r"^#LEON-GUARDADO (?:fora-da-allowlist|repetida|formato|valor|superada) ")
-RE=re.compile(r"\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*")
-bruto=open(source,encoding="utf-8").read().splitlines()
-cand=[PRE.sub("",l,count=1) for l in bruto]
-# A4 (revisao Astra 17/09): antes disto a marca de quarentena saia ANTES de escolher
-# a ultima ocorrencia, entao a linha GUARDADA disputava como candidata normal e vencia
-# por ser a de baixo: a credencial arquivada voltava a ativa e a que o cliente acabou
-# de corrigir virava "repetida". Agora quem era guardada anda marcada:
-#   ATIVA sempre vence. Guardada so volta a ativa quando a chave NAO tem nenhuma
-#   ativa (e o bridge aceita). Existindo as duas, a guardada continua guardada, com
-#   motivo 'superada'. Nunca duas ativas; nenhuma linha some.
-guardada=[PRE.match(l) is not None for l in bruto]
-ultimo_ativo={};ultimo_guardado={}
-for i,l in enumerate(cand):
-    if not l.strip() or l.lstrip().startswith("#"): continue
-    m=RE.fullmatch(l)
-    if not m: continue
-    (ultimo_guardado if guardada[i] else ultimo_ativo)[m.group(1)]=i
-selected=[];guardadas=[]
-def marca(motivo,linha,chave,i):
-    guardadas.append(motivo+" "+(chave or ("linha:"+str(i+1))))
-    return "#LEON-GUARDADO "+motivo+" "+linha
-for i,l in enumerate(cand):
-    if not l.strip() or l.lstrip().startswith("#"):
-        selected.append(l); continue
-    m=RE.fullmatch(l)
-    if not m:
-        selected.append(marca("formato",l,None,i)); continue
-    key,value=m.groups()
-    if key in managed: continue
-    if guardada[i]:
-        if key in ultimo_ativo:
-            selected.append(marca("superada",l,key,i)); continue
-        if ultimo_guardado.get(key)!=i:
-            selected.append(marca("repetida",l,key,i)); continue
-    elif ultimo_ativo.get(key)!=i:
-        selected.append(marca("repetida",l,key,i)); continue
-    if any(ch in value for ch in "\r\n\x00") or len(value)>8192:
-        selected.append(marca("valor",l,key,i)); continue
-    if not tolerante and not (key in allowed or (aceita is not None and key in aceita)):
-        selected.append(marca("fora-da-allowlist",l,key,i)); continue
-    selected.append(key+"="+value)
-temp=destination+".allow-new"
-fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
-try: os.write(fd,"".join(l+"\n" for l in selected).encode()); os.fsync(fd)
-finally: os.close(fd)
-os.replace(temp,destination)
-rel=destination+".guardadas"
-tmp2=rel+".new"
-fd=os.open(tmp2,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
-try: os.write(fd,"".join(g+"\n" for g in guardadas).encode()); os.fsync(fd)
-finally: os.close(fd)
-os.replace(tmp2,rel)
-PY
-  rm -rf -- "$obra"
-}
-
+# ---- .ENV DO CLIENTE: O ARQUIVO E DO DONO (23/09, desenho estrutural) --------
+# POR QUE MUDOU DE NOVO: tres rodadas de remendo (allowlist na escrita, bloco gerenciado que
+# vencia o dono, quarentena #LEON-GUARDADO) reprovaram na mesma classe: /atualiza trocava
+# TTS_PROVIDER, VOICE_REPLY, CODEX_REASONING_EFFORT, DRAIN_SEG e as pastas pelo padrao,
+# comentava chave de integracao e tirava a integracao do ar. A regra agora e uma so:
+#   - toda linha do .env do dono sai BYTE A BYTE (leon_preserva env-acrescenta);
+#   - o que falta entra no FIM, com o padrao do produto (ou com o valor que uma versao velha
+#     escondeu em #LEON-GUARDADO fora-da-allowlist);
+#   - a unica excecao e a lista PRODUTO_ENV do preserva-casa.py, e so com valor invalido
+#     provado aqui (CLI abaixo do minimo que este update subiu, binario que nao executa);
+#   - .env que o bridge recusaria (linha fora do formato, chave repetida, valor com byte de
+#     controle) NAO e consertado por nos: o update para antes de mexer em qualquer coisa e diz
+#     a linha. Consertar seria reescrever o arquivo do dono.
 rewrite_runtime_env() {
-  local env_file="$1" temp bloco cauda geridas
-  temp="${env_file}.managed-new"
-  bloco="${env_file}.managed-bloco"
-  cauda="${env_file}.managed-cauda"
-  geridas="${env_file}.managed-nomes"
-  # Preserva o modelo já validado no login (a prova pós-login testa em ordem
-  # e grava o que respondeu): a conta ChatGPT do cliente pode não ter o "sol",
-  # e o update não pode voltar pro default sobrescrevendo o que já funciona.
-  # O default depende do motor: cada um tem os modelos dele, e cair no default do outro
-  # deixaria a casa apontando pra um nome que o motor de pe nem conhece.
-  local codex_model existing_model
+  local env_file="$1" pad trocas rel saida rc codex_model atual
+  pad="${env_file}.preserva-padroes"
+  trocas="${env_file}.preserva-trocas"
+  rel="${env_file}.preserva-relatorio"
+  saida="${env_file}.preserva-saida"
+  rm -f -- "$pad" "$trocas" "$rel" "$saida"
   if [ "$LEON_ENGINE_CASA" = claude ]; then
-    # 2.6.8: so vale pra casa SEM CODEX_MODEL (a de cima preserva o que ja existe). Sonnet e o
-    # padrao da frota desde o incidente de 23/09 (Opus zerava a janela do plano do cliente).
-    codex_model="claude-sonnet-5"
+    # Lei do dono (23/09 noite): o padrao do Claude e o Opus, nunca o Sonnet (so entra se faltar a chave).
+    codex_model="claude-opus-5-5"
   else
     codex_model="${CODEX_MODEL_EFETIVO:-gpt-5.6-sol}"
   fi
-  if existing_model="$(safe_env_value "$env_file" CODEX_MODEL 2>/dev/null)" \
-    && printf '%s' "$existing_model" | grep -qE '^[A-Za-z0-9._-]+$'; then
-    codex_model="$existing_model"
-  fi
-  # O BLOCO GERENCIADO e montado ANTES da cauda para que os NOMES dele saiam do
-  # proprio bloco (nada de rol de nomes para alguem esquecer de atualizar) e a cauda
-  # possa descartar exatamente essas chaves. O bloco vence; a cauda nunca duplica.
-  : > "$bloco"
-  chmod 0600 "$bloco" 2>/dev/null || true
-  # O MOTOR DA CASA e escolha do dono e o update nao a desfaz. Enquanto estas duas linhas
-  # eram cravadas em "codex", um /atualiza numa casa do outro motor a devolvia calada pro
-  # motor historico: o servico subia no motor errado sem ninguem pedir e sem nada avisar.
-  cat >> "$bloco" <<EOF
+  # PADROES: o que a casa recebe SO se nao tiver a chave. Mesmo conteudo do antigo bloco
+  # gerenciado; a diferenca e que ele nao vence mais o dono.
+  # CODEX_HOME / CLAUDE_CONFIG_DIR (24/09, rodada 3): quando faltam, entra a pasta que o bridge
+  # JA usa (homeDoMotor: ~/.codex ou ~/.claude quando tem credencial), nunca a do LEON. Gravar
+  # <LEON_DATA_DIR>/codex numa casa que roda no ~/.codex do dono tirava o login, os MCPs, os
+  # profiles e os providers dele, e o LEON ficava "sem token".
+  (
+    umask 077
+    cat > "$pad" <<PADROES
 ENGINE=$LEON_ENGINE_CASA
 ENGINE_DEFAULT=$LEON_ENGINE_CASA
 LEON_DATA_DIR=$LEON_DATA_DIR
-BRAIN_DIR=$LEON_DATA_DIR/brain
-PERSONA_DIR=$LEON_DATA_DIR/persona
+BRAIN_DIR=$BRAIN_DIR
+PERSONA_DIR=$PERSONA_DIR
 LEON_SKILLS_DIR=$LEON_SKILLS_DIR
 LEON_SKILLS_PESSOAIS_DIR=$(skills_personal_dir)
 LEON_TMPDIR=$LEON_TMPDIR
@@ -1664,57 +2693,70 @@ EDGE_TTS_PY=$LEON_DATA_DIR/edgetts-venv/bin/python3
 PIPER_WORKER=$INSTALL_DIR/workers/piper.js
 PIPER_BIN=$LEON_DATA_DIR/piper-venv/bin/piper
 PIPER_MODEL=$LEON_DATA_DIR/voices/piper/pt_BR-faber-medium.onnx
-MEMVIVA_FILE=$LEON_DATA_DIR/brain/MEMORIA-VIVA.md
-ASSUNTOS_FILE=$LEON_DATA_DIR/brain/ASSUNTOS-VIVOS.md
-TTS_PROVIDER=edgetts
+MEMVIVA_FILE=$MEMVIVA_FILE
+ASSUNTOS_FILE=$ASSUNTOS_FILE
+TTS_PROVIDER=disabled
 VOICE_REPLY=mirror
 DRAIN_SEG=300
-EOF
-  # As chaves do CLI de cada motor entram so na casa que usa aquele CLI. Escrever as do
-  # Codex numa casa do outro motor apontaria pra um binario que nao existe ali.
-  if [ "$LEON_ENGINE_CASA" = codex ]; then
-    cat >> "$bloco" <<EOF
+PADROES
+    if [ "$LEON_ENGINE_CASA" = codex ]; then
+      cat >> "$pad" <<PADROES
 LEON_CODEX_ONLY=1
 CODEX_APP_SERVER=1
-CODEX_HOME=$CODEX_HOME_DIR
+CODEX_HOME=$(leon_preserva home-do-motor "$env_file" codex "$CODEX_HOME_DIR")
 CODEX_BIN=$CODEX_BIN_PATH
 CODEX_MODEL=$codex_model
 CODEX_REASONING_EFFORT=high
 LEON_CODEX_CLI_VERSION=$LEON_CODEX_CLI_VERSION
-EOF
-  else
-    cat >> "$bloco" <<EOF
-CLAUDE_CONFIG_DIR=$LEON_DATA_DIR/claude
+PADROES
+    else
+      cat >> "$pad" <<PADROES
+CLAUDE_CONFIG_DIR=$(leon_preserva home-do-motor "$env_file" claude "$LEON_DATA_DIR/claude")
 CODEX_MODEL=$codex_model
 CODEX_REASONING_EFFORT=high
-EOF
+PADROES
+    fi
+    [ -z "${CLAUDE_BIN_NOVO:-}" ] || printf 'CLAUDE_BIN=%s\n' "$CLAUDE_BIN_NOVO" >> "$pad"
+    : > "$trocas"
+  ) || return 1
+  # TROCAS: so chave da lista do produto, e so com o valor atual provado invalido.
+  if [ "$LEON_ENGINE_CASA" = codex ]; then
+    atual="$(env_get_from "$env_file" CODEX_BIN)"
+    if [ "$CODEX_CLI_SUBIU" = 1 ]; then
+      # o CLI da casa estava abaixo do minimo da release e este update instalou o novo: a versao
+      # velha no .env e invalida, e o binario pinado dela tambem. Binario do DONO (fora de
+      # <LEON_DATA_DIR>/codex-cli): nem ele nem a versao trocam (24/09, rodada 5). Quem decide
+      # "dentro ou fora" e o env-acrescenta, pelo leitor do bridge; aqui so se pede.
+      printf 'LEON_CODEX_CLI_VERSION=%s\n' "$LEON_CODEX_CLI_VERSION" >> "$trocas"
+      printf 'CODEX_BIN=%s\n' "$CODEX_BIN_PATH" >> "$trocas"
+    elif [ -n "$atual" ] && [ ! -x "$atual" ] && [ "$TEST_MODE" != 1 ]; then
+      printf 'CODEX_BIN=%s\n' "$CODEX_BIN_PATH" >> "$trocas"
+    fi
   fi
-  # 23/09: o CLI do Claude subiu neste update. O bloco vence a cauda, entao um CLAUDE_BIN antigo
-  # do dono nao volta a apontar pro binario velho.
-  if [ -n "${CLAUDE_BIN_NOVO:-}" ]; then
-    printf 'CLAUDE_BIN=%s\n' "$CLAUDE_BIN_NOVO" >> "$bloco"
+  [ -z "${CLAUDE_BIN_NOVO:-}" ] || printf 'CLAUDE_BIN=%s\n' "$CLAUDE_BIN_NOVO" >> "$trocas"
+  rc=0
+  leon_preserva env-acrescenta "$env_file" "$pad" "$trocas" "$saida" "$rel" "$LEON_DATA_DIR" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    ENV_RECUSA="$(sed -n 's/^recusa //p' "$rel" 2>/dev/null | tr '\n' ' ')"
+    rm -f -- "$pad" "$trocas" "$rel" "$saida"
+    return "$rc"
   fi
-  sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$bloco" | sort -u > "$geridas" \
-    || { rm -f -- "$bloco" "$geridas"; return 1; }
-  # O bridge do STAGE tolera chave fora da allowlist? (readSafeEnvFile com _envEstrito, 21/09).
-  # Tolera e o dono nao pediu LEON_ENV_ESTRITO=1: a chave dele fica ativa.
-  local tolerante=0
-  if [ -n "${STAGE:-}" ] && [ -f "$STAGE/bridge.cjs" ] \
-     && grep -q 'function _envEstrito' "$STAGE/bridge.cjs" \
-     && ! grep -qE '^[[:space:]]*LEON_ENV_ESTRITO[[:space:]]*=[[:space:]]*["'"'"']?1["'"'"']?[[:space:]]*(#.*)?$' "$env_file"; then
-    tolerante=1
+  # NOMES (nunca valor) do que mudou vao pro log da casa.
+  if grep -q '^\(nova\|religada\) ' "$rel"; then
+    say "   .env: nenhuma linha tua mudou; acrescentei no fim: $(sed -n 's/^\(nova\|religada\) //p' "$rel" | tr '\n' ' ')"
   fi
-  filter_user_env "$env_file" "$cauda" "$geridas" "${STAGE:-}/lib/integracoes.cjs" "$tolerante" \
-    || { rm -f -- "$bloco" "$cauda" "$geridas"; return 1; }
-  cat -- "$cauda" "$bloco" > "$temp" \
-    || { rm -f -- "$bloco" "$cauda" "$geridas" "$temp"; return 1; }
-  # NOMES do que ficou guardado vao para o log da casa; VALOR nunca sai daqui.
-  if [ -s "$cauda.guardadas" ]; then
-    say "   .env: $(wc -l < "$cauda.guardadas" | tr -d ' ') linha(s) que este bridge nao aceita ficaram GUARDADAS no proprio .env (#LEON-GUARDADO); nada foi apagado: $(tr '\n' ' ' < "$cauda.guardadas")"
+  if grep -q '^religada ' "$rel"; then
+    say "   .env: voltaram a valer (uma versao antiga tinha comentado): $(sed -n 's/^religada //p' "$rel" | tr '\n' ' ')"
   fi
-  rm -f -- "$bloco" "$cauda" "$cauda.guardadas" "$geridas"
-  chmod 0600 "$temp"
-  mv -f -- "$temp" "$env_file"
+  if grep -q '^trocada ' "$rel"; then
+    say "   .env: chaves do produto com valor invalido, corrigidas: $(sed -n 's/^trocada //p' "$rel" | tr '\n' ' ')"
+  fi
+  if grep -q '^binario-do-dono ' "$rel"; then
+    say "   .env: CODEX_BIN aponta pra binario teu, fora da pasta do produto: mantive."
+  fi
+  chmod 0600 "$saida"
+  mv -f -- "$saida" "$env_file"
+  rm -f -- "$pad" "$trocas" "$rel"
 }
 
 # O vigia (scripts/update-verdict.sh) vem do pacote-base e e trocado a cada update; o
@@ -1723,7 +2765,9 @@ EOF
 injetar_handoff_update_verdict() {
   local vigia="$1" tmp
   [ -f "$vigia" ] || return 0
-  if grep -q 'LEON-HANDOFF-UPDATE v1' "$vigia"; then
+  # v2 (24/09, rodada 5): o bloco v1 exportava a linha crua do .env; o leon-base publicado ja traz
+  # o v1, entao o v1 e TROCADO pelo v2 (mesma posicao), nao so pulado.
+  if grep -q 'LEON-HANDOFF-UPDATE v2' "$vigia"; then
     return 0
   fi
   tmp="$vigia.leon-new"
@@ -1731,7 +2775,7 @@ injetar_handoff_update_verdict() {
 import os, re, sys
 src, dst = sys.argv[1:]
 text = open(src, encoding="utf-8").read()
-bloco = r'''# --- LEON-HANDOFF-UPDATE v1 (gravado pelo instalador e pelo atualizador) ------------------
+bloco = r'''# --- LEON-HANDOFF-UPDATE v2 (gravado pelo instalador e pelo atualizador) ------------------
 # O bridge roda numa unit com NoNewPrivileges (setuid/setgid nao valem la
 # dentro), entao ele nao dispara o update-pago.sh: grava so o PEDIDO em
 # .update-request.json e este vigia, que roda no cron do usuario FORA da
@@ -1758,20 +2802,26 @@ if [ -f "$PEDIDO_UPDATE" ]; then
     anota_pedido "handoff: disparando update-pago.sh fora da unit (chat ${CHAT_PEDIDO:-?})"
     (
       cd "$BRIDGE_DIR" || exit 0
-      # Mesmo efeito de "set -a; . .env; set +a", sem executar valor mal formado:
-      # so linhas CHAVE=valor viram ambiente.
-      while IFS= read -r _linha || [ -n "$_linha" ]; do
-        case "$_linha" in [A-Za-z_]*=*) export "$_linha" 2>/dev/null || true ;; esac
-      done < "$BRIDGE_DIR/.env"
+      # O .env vira ambiente pelo MESMO leitor do bridge (aspas, comentario no fim, espaco,
+      # CRLF): o atualizador responde "--preserva env-exporta" com export CHAVE=<valor com aspas
+      # de shell>. A linha crua exportada de antes levava aspas e comentario literais. Atualizador
+      # sem essa entrada (nao acontece: vigia e atualizador vem da mesma versao) nao recebe nada.
+      if grep -q 'LEON-PRESERVA-ENTRADA v1' "$BRIDGE_DIR/update-pago.sh" 2>/dev/null; then
+        ENV_DO_DONO="$(bash "$BRIDGE_DIR/update-pago.sh" --preserva env-exporta "$BRIDGE_DIR/.env" 2>/dev/null)" \
+          && eval "$ENV_DO_DONO"
+      fi
       nohup bash "$BRIDGE_DIR/update-pago.sh" "$CHAT_PEDIDO" "$THREAD_PEDIDO" >/dev/null 2>&1 &
     )
   fi
 fi
 # --- fim LEON-HANDOFF-UPDATE ------------------------------------------------
 '''
+velho = re.compile(r'^# --- LEON-HANDOFF-UPDATE v1 .*?^# --- fim LEON-HANDOFF-UPDATE -*\n', re.M | re.S)
 anchor = re.compile(r'^\[ -f "\$RECIBO" \] \|\| exit 0.*$', re.M)
 m = anchor.search(text)
-if m is None:
+if velho.search(text):
+    text = velho.sub(lambda _m: bloco, text, count=1)
+elif m is None:
     # Pacote sem a linha esperada: entra logo depois de RECIBO= (BRIDGE_DIR ja existe ali).
     m2 = re.search(r'^RECIBO="\$BRIDGE_DIR/\.update-pending\.json".*\n', text, re.M)
     if m2 is None:
@@ -1819,35 +2869,6 @@ trust_level = "trusted"
 [features]
 multi_agent_v2 = true
 
-[agents]
-enabled = true
-max_concurrent_threads_per_session = 2
-default_subagent_reasoning_effort = "low"
-
-[agents."braco_conteudo"]
-description = "Conteudo: carrossel, reel, stories, headline, calendario, post."
-config_file = "$INSTALL_DIR/.codex/agents/braco_conteudo.toml"
-nickname_candidates = ["conteudo"]
-
-[agents."braco_funil"]
-description = "Funil: carta/VSL, landing, isca, webinario, lancamento, captura."
-config_file = "$INSTALL_DIR/.codex/agents/braco_funil.toml"
-nickname_candidates = ["funil"]
-
-[agents."braco_vendas"]
-description = "Vendas: script, objecao, fechamento, prospeccao, pipeline, pos-venda."
-config_file = "$INSTALL_DIR/.codex/agents/braco_vendas.toml"
-nickname_candidates = ["vendas"]
-
-[agents."braco_financeiro"]
-description = "Financeiro: contas, saldo, conciliacao, cobranca, relatorio."
-config_file = "$INSTALL_DIR/.codex/agents/braco_financeiro.toml"
-nickname_candidates = ["financeiro"]
-
-[agents."braco_advogado"]
-description = "Juridico: contrato, clausula, risco legal, LGPD, revisao de termo."
-config_file = "$INSTALL_DIR/.codex/agents/braco_advogado.toml"
-nickname_candidates = ["advogado"]
 
 [shell_environment_policy]
 inherit = "core"
@@ -1868,7 +2889,12 @@ EOF
   # token DIRETO do .meta-token.json — por isso NÃO há bearer_token_env_var nem url-crua. A
   # url-crua expunha os 106 tools da Meta (incl. escrita) e cada /atualiza a regravava, matando
   # o filtro instalado pelo meta-connect (achado Fable 30/08).
-  if [ -f "$INSTALL_DIR/.meta-token.json" ]; then
+  # 24/09 (rodada 3): o token mora onde o bridge grava, tokenPath(WORKDIR) com WORKDIR = WORK_DIR
+  # do .env ou o runtime. Procurar so no runtime tirava o meta-ads da casa com WORK_DIR proprio.
+  local meta_wd
+  meta_wd="$(leon_preserva env-valor "$ENV_READ_SAFE" WORK_DIR 2>/dev/null)" || meta_wd=""
+  case "$meta_wd" in /*) ;; '') meta_wd="$INSTALL_DIR" ;; *) meta_wd="$INSTALL_DIR/$meta_wd" ;; esac
+  if [ -f "$meta_wd/.meta-token.json" ] || [ -f "$INSTALL_DIR/.meta-token.json" ]; then
     cat >> "$destination" <<METAEOF
 
 [mcp_servers.meta-ads]
@@ -1898,78 +2924,53 @@ if "sandbox_workspace_write" in data: raise SystemExit(1)
 PY
 }
 
-# LEVA AS INTEGRACOES MCP DO DONO PRO config.toml NOVO (23/09, prova de preservacao).
-# write_codex_config_candidate gera o config.toml do molde e so re-poe o [mcp_servers.meta-ads],
-# que e do produto. Todo outro servidor MCP que o dono (ou o proprio LEON a pedido dele) ligou
-# no config.toml do Codex sumia do config ativo a cada /atualiza: medido na bancada, 2 de 2
-# servidores plantados sumiram na troca 2.6.7 -> 2.6.8 (a copia ficava so em
-# update-transactions/<tx>/config.backup, onde o Codex nao le).
-# Regra: todo [mcp_servers.<nome>] do config atual que o candidato NAO declara entra no
-# candidato com o valor identico (conferido relendo o TOML). Nome que o produto gerencia
-# (meta-ads) fica com o do produto: e ele quem decide se o bloco existe e em que modo.
-# Config atual ilegivel: o Codex tambem nao o le, entao nao ha integracao ativa a levar; a
-# copia inteira continua em config.backup da transacao. Falha ao levar = o update para
-# antes de trocar qualquer coisa (preservar vence).
-leva_mcp_do_dono() {  # leva_mcp_do_dono <config atual> <candidato>
-  local atual="$1" candidato="$2" nomes
-  [ -f "$atual" ] || return 0
-  nomes="$("$PYTHON_BIN" - "$atual" "$candidato" <<'PY'
-import json, math, os, re, sys, datetime
-try: import tomllib
-except ImportError: import tomli as tomllib
-atual, candidato = sys.argv[1:]
-GERENCIADOS = {"meta-ads"}
-try:
-    velho = tomllib.load(open(atual, "rb"))
-except Exception:
-    print("#ilegivel"); raise SystemExit(0)
-novo = tomllib.load(open(candidato, "rb"))
-mv = velho.get("mcp_servers")
-if not isinstance(mv, dict) or not mv: raise SystemExit(0)
-mn = novo.get("mcp_servers") if isinstance(novo.get("mcp_servers"), dict) else {}
-leva = {k: v for k, v in mv.items() if k not in mn and k not in GERENCIADOS and isinstance(v, dict)}
-if not leva: raise SystemExit(0)
-def chave(k): return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k, ensure_ascii=False)
-def valor(v):
-    if isinstance(v, bool): return "true" if v else "false"
-    if isinstance(v, int): return str(v)
-    if isinstance(v, float):
-        if math.isnan(v) or math.isinf(v): raise ValueError("float fora do TOML")
-        return repr(v)
-    if isinstance(v, str): return json.dumps(v, ensure_ascii=False)
-    if isinstance(v, (datetime.datetime, datetime.date, datetime.time)): return v.isoformat()
-    if isinstance(v, list): return "[" + ", ".join(valor(x) for x in v) + "]"
-    if isinstance(v, dict): return "{ " + ", ".join(chave(k) + " = " + valor(x) for k, x in v.items()) + " }"
-    raise ValueError("tipo fora do TOML")
-def tabela(caminho, d):
-    linhas = ["[" + ".".join(chave(p) for p in caminho) + "]"]
-    subs = []
-    for k, v in d.items():
-        if isinstance(v, dict): subs.append((k, v))
-        else: linhas.append(chave(k) + " = " + valor(v))
-    txt = "\n".join(linhas) + "\n"
-    for k, v in subs: txt += "\n" + tabela(caminho + [k], v)
-    return txt
-bloco = "\n# integracoes MCP do dono, trazidas do config.toml anterior pelo /atualiza\n"
-for nome, v in leva.items(): bloco += "\n" + tabela(["mcp_servers", nome], v)
-texto = open(candidato, encoding="utf-8").read()
-if not texto.endswith("\n"): texto += "\n"
-texto += bloco
-conf = tomllib.loads(texto)
-for nome, v in leva.items():
-    if conf["mcp_servers"].get(nome) != v: raise SystemExit("o servidor MCP " + nome + " nao voltou identico")
-tmp = candidato + ".mcp-new"
-fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-with os.fdopen(fd, "w", encoding="utf-8") as fh: fh.write(texto)
-os.replace(tmp, candidato)
-print(" ".join(sorted(leva)))
-PY
-)" || return 1
-  case "$nomes" in
-    '') ;;
-    '#ilegivel') say "   config.toml atual ilegivel: nenhuma integracao MCP ativa pra levar (copia inteira em config.backup da transacao)." ;;
-    *) say "   config.toml: integracoes MCP do dono mantidas no config novo: $nomes" ;;
+# CONFIG.TOML DO CODEX (23/09, desenho estrutural). Dois casos, decididos pelo CODEX_HOME que o
+# .env do dono declara (e o que o bridge usa):
+#   - CODEX_HOME do DONO (fora de <LEON_DATA_DIR>/codex): o produto nao escreve config.toml
+#     nenhum. O que o LEON precisa (aprovacao, sandbox, perfil) ja vai por thread nos
+#     parametros do app-server (lib-motores/codex-appserver.cjs), nao pelo arquivo.
+#   - CODEX_HOME do LEON: leon_preserva toml-funde. O texto do dono e a base; o molde so
+#     acrescenta o que falta; a unica excecao e a lista de seguranca do preserva-casa.py.
+#     Config ilegivel DE VERDADE (o leitor TOML do python recusa E o Codex pinado tambem
+#     recusa): vai o molde e o do dono fica ao lado em config.toml.ilegivel-<tx>. O Codex le e
+#     o python nao (BOM, tabela inline em varias linhas do TOML 1.1), python sem leitor TOML,
+#     ou seguranca que nao cabe sem reescrever estrutura do dono: o config do dono fica
+#     INTACTO e o log diz.
+# 24/09 (rodada 2): a mesma fonte do install-leon.sh. Do dono = o .env declara outra pasta, OU
+# <LEON_DATA_DIR>/codex e link (ou passa por link) pra fora, OU o config.toml dela e link (o
+# LEON segue o config pessoal do dono; trocar o link por arquivo corta esse elo pra sempre).
+codex_home_do_dono() {  # sai 0 quando o CODEX_HOME desta casa e do dono
+  leon_preserva codex-home-do-dono "$ENV_READ_SAFE" "$LEON_DATA_DIR" >/dev/null 2>&1
+}
+
+funde_config_do_dono() {  # funde_config_do_dono <config atual> <molde> <candidato>
+  local atual="$1" molde="$2" cand="$3" rel="$3.relatorio" rc
+  rc=0
+  LEON_PRESERVA_CODEX="${CODEX_BIN_PATH:-}" \
+  LEON_PRESERVA_PATH="$(dirname "${NODE_BIN:-/usr/bin/node}"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    leon_preserva toml-funde "$atual" "$molde" "$cand" "$rel" "$INSTALL_DIR" || rc=$?
+  case "$rc" in
+    0)
+      if grep -q '^acrescentada ' "$rel"; then
+        say "   config.toml: nada teu mudou; acrescentei do molde: $(sed -n 's/^acrescentada //p' "$rel" | tr '\n' ' ')"
+      fi
+      if grep -q '^\(seguranca\|removida\) ' "$rel"; then
+        say "   config.toml: ajuste de seguranca do produto: $(sed -n 's/^\(seguranca\|removida\) //p' "$rel" | tr '\n' ' ')"
+      fi
+      ;;
+    2)
+      cp -p -- "$molde" "$cand"
+      printf 'ilegivel\n' > "$TX_DIR/config-ilegivel"
+      say "   config.toml atual ilegivel ($(head -1 "$rel")): vai o molde e o teu fica ao lado em config.toml.ilegivel-$TX_ID."
+      ;;
+    3)
+      rm -f -- "$cand"
+      say "   config.toml: mantido INTACTO ($(head -1 "$rel")); o LEON segue pelos parametros do app-server."
+      ;;
+    *) rm -f -- "$rel"; return 1 ;;
   esac
+  rm -f -- "$rel"
+  return 0
 }
 
 tx_read() {
@@ -1998,11 +2999,20 @@ restore_crontab_from_tx() {
   fi
 }
 
+# VOLTA (23/09, desenho estrutural): o config.toml volta BYTE A BYTE do backup, e so quando
+# esta transacao o trocou (config-applied). A versao que estava ativa na hora da volta (pode ter
+# mudanca do dono feita depois do update) fica ao lado em config.toml.pos-atualiza-<tx>.
 restore_config_from_tx() {
-  local tx="$1" config_path had_config tmp
+  local tx="$1" config_path had_config applied tmp txid
   config_path="$(tx_read "$tx" config-path)"
   had_config="$(tx_read "$tx" had-config)"
+  applied="$(cat "$tx/config-applied" 2>/dev/null || echo 1)"
+  [ "$applied" = 1 ] || return 0
+  txid="$(basename "$tx")"
   mkdir -p -- "$(dirname "$config_path")"
+  if [ -f "$config_path" ] && ! { [ -f "$tx/config.backup" ] && cmp -s -- "$config_path" "$tx/config.backup"; }; then
+    cp -p -- "$config_path" "${config_path}.pos-atualiza-$txid" 2>/dev/null || true
+  fi
   if [ "$had_config" = "1" ] && [ -f "$tx/config.backup" ]; then
     tmp="${config_path}.leon-restore-$$"
     cp -p -- "$tx/config.backup" "$tmp"
@@ -2010,6 +3020,18 @@ restore_config_from_tx() {
   elif [ "$had_config" = "0" ]; then
     rm -f -- "$config_path"
   fi
+  printf '0\n' > "$tx/config-applied"
+}
+
+# VOLTA (23/09): o .env do runtime velho volta BYTE A BYTE (ele viaja dentro do backup, que
+# nenhum passo reescreve). O .env que estava ativo no runtime que voltou pra tras fica ao lado,
+# com sufixo, pra nada que o dono mudou depois do update se perder. Nada e fundido.
+guarda_env_pos_atualiza() {  # guarda_env_pos_atualiza <runtime restaurado> <runtime que saiu> <tx>
+  local live="$1" saiu="$2" txid
+  txid="$(basename "$3")"
+  [ -f "$saiu/.env" ] && [ ! -L "$saiu/.env" ] || return 0
+  if [ -f "$live/.env" ] && cmp -s -- "$saiu/.env" "$live/.env"; then return 0; fi
+  install -m 0600 -- "$saiu/.env" "$live/.env.pos-atualiza-$txid" 2>/dev/null || true
 }
 
 restore_unit_from_tx() {
@@ -2085,7 +3107,10 @@ restore_skills_from_tx() {
 # qualquer skill que o dono tivesse posto la. A pasta pessoal e criada (vazia) no proprio
 # update, entao a casa que atualiza uma vez ja passa a ter o lugar certo pra guardar.
 skills_personal_dir() {
-  printf '%s\n' "${LEON_SKILLS_PESSOAIS_DIR:-${LEON_DATA_DIR:-$HOME/.leon}/skills-pessoais}"
+  # a pasta sai do leitor unico (leon_bases_do_dono no topo do atualizador e do finalizador);
+  # chamada avulsa (ajudante de bancada) le o .env da casa aqui mesmo
+  [ -n "${LEON_SKILLS_PESSOAIS_DIR:-}" ] || leon_bases_do_dono "$INSTALL_DIR/.env" >/dev/null 2>&1 || true
+  printf '%s\n' "${LEON_SKILLS_PESSOAIS_DIR:-}"
 }
 
 # Cria a pasta pessoal se ainda nao existir, com as mesmas guardas do resto do updater:
@@ -2166,7 +3191,6 @@ if [ "${LEON_TEST_SKILLS_HELPERS_ONLY:-0}" = "1" ]; then
     # 17/09 (revisao Astra, A3): o predicado de LEON_SESSIONS_FILE e o guarda-chave
     # expostos crus, pra bancada provar a MESMA funcao que o /atualiza chama.
     ledger-sessoes)     ledger_sessions_file_honrado "$2" "$3" ;;
-    env-guarda)         env_guarda_chave "$2" "$3" "$4" ;;
     personal-ensure)    ensure_skills_personal_dir ;;
     personal-ready)     skills_personal_dir_ready ;;
     backup-remove)      remove_committed_skills_backup "$2" "$3" ;;
@@ -2186,7 +3210,8 @@ if [ "${LEON_TEST_SKILLS_HELPERS_ONLY:-0}" = "1" ]; then
       if [ -e "$_cr_dir" ]; then mv -- "$_cr_dir" "$_cr_failed" || exit 1; fi
       mv -- "$_cr_backup" "$_cr_dir" || exit 1
       ;;
-    env-filter)         filter_user_env "$2" "$3" "${4:-}" "${5:-}" ;;
+    # 23/09: o ajudante unico de preservacao (.env, config.toml, skills do dono) exposto cru.
+    preserva)           shift; leon_preserva "$@" ;;
     *) exit 64 ;;
   esac
   exit $?
@@ -2207,6 +3232,7 @@ rollback_transaction() {
       mv -- "$live" "$failed" || return 1
     fi
     mv -- "$backup" "$live" || return 1
+    guarda_env_pos_atualiza "$live" "$failed" "$tx"
   fi
   restore_skills_from_tx "$tx" || return 1
   restore_config_from_tx "$tx" || return 1
@@ -2232,6 +3258,7 @@ rollback_inline() {
       mv -- "$live" "$failed" || return 1
     fi
     mv -- "$backup" "$live" || return 1
+    guarda_env_pos_atualiza "$live" "$failed" "$tx"
   fi
   restore_skills_from_tx "$tx" || return 1
   restore_config_from_tx "$tx" || return 1
@@ -2303,6 +3330,7 @@ health_smoke() {
   stable_sleep="${LEON_HEALTH_STABLE_SLEEP:-3}"
   [ "${LEON_TEST_FAIL_AT:-}" != "health" ] || return 1
   [ -f "$live/bridge.cjs" ] || return 1
+  if bridge_e_leon2 "$live/bridge.cjs"; then leon2_sintaxe_ok "$live" || return 1; fi
   [ -s "$live/appserver/adapter.cjs" ] || return 1
   [ -s "$live/lib/onboarding.js" ] || return 1
   [ -s "$live/lib-motores/codex-appserver.cjs" ] || return 1
@@ -2424,9 +3452,12 @@ report_version_from_tx() {
   central="$(cat "$tx/report-central" 2>/dev/null || true)"
   [ -n "$ver" ] && [ -n "$email" ] && [ -n "$central" ] || return 0
   printf %s "$central" | grep -qE '^https://' || return 0
-  curl -fsS --max-time 15 -X POST "$central/versao-report" \
-    -H 'Content-Type: application/json' \
-    -d "{\"email\":\"$email\",\"versao\":\"$ver\"}" >/dev/null 2>&1 || true
+  # 23/09 (G5): telemetria nunca segura nada. Conexao curta, teto de 10 s e em SEGUNDO PLANO:
+  # com a VPS do dono fora, o finalizador segue na hora e o relato morre sozinho.
+  ( curl -fsS --connect-timeout 5 --max-time 10 -X POST "$central/versao-report" \
+      -H 'Content-Type: application/json' \
+      -d "{\"email\":\"$email\",\"versao\":\"$ver\"}" >/dev/null 2>&1 || true ) </dev/null >/dev/null 2>&1 &
+  return 0
 }
 
 # F1.5: rastro do ciclo da madrugada na central. Best-effort, timeout curto, NUNCA derruba o
@@ -2444,10 +3475,12 @@ report_diagnostico_from_tx() {
   if [ "$resultado" = "ok" ]; then versao="$(cat "$tx/new-version" 2>/dev/null || true)"
   else versao="$(cat "$tx/prev-version" 2>/dev/null || true)"; fi
   evento="update-auto"; [ -f "$tx/report-auto" ] && [ -z "$(cat "$tx/report-auto" 2>/dev/null)" ] && evento="update"
-  curl -fsS --max-time 15 -X POST "$central/diagnostico" \
+  # 23/09 (G5): mesmo contrato do report de versao: conexao curta, teto de 10 s, segundo plano.
+  ( curl -fsS --connect-timeout 5 --max-time 10 -X POST "$central/diagnostico" \
     -H 'Content-Type: application/json' \
     -d "{\"email\":\"$(json_escape "$email")\",\"machine_id\":\"$(json_escape "$machine_id")\",\"versao\":\"$(json_escape "$versao")\",\"evento\":\"$evento\",\"resultado\":\"$(json_escape "$resultado")\",\"motivo\":\"$(json_escape "$motivo")\",\"em\":$(date +%s)000}" \
-    >/dev/null 2>&1 || true
+    >/dev/null 2>&1 || true ) </dev/null >/dev/null 2>&1 &
+  return 0
 }
 
 # ---- TRAVA DE COMMIT (04/09) ----------------------------------------------
@@ -2635,6 +3668,9 @@ finalize_transaction() {
     committed) ;;
     *) return 0 ;;
   esac
+  # o cron nao traz ambiente: as pastas (skills-pessoais, registro do catalogo) saem do .env da
+  # casa pelo leitor unico, igual ao corpo do atualizador (24/09, rodada 5)
+  leon_bases_do_dono "$live/.env" || return 1
   lock_dir="$tx/.finalize-lock"
   # Trava presente = commit em andamento (ou outro finalizador). Sai em paz: o
   # proximo tique do cron encontra a casa estavel. So reivindica trava expirada.
@@ -2650,16 +3686,36 @@ finalize_transaction() {
     # onde uma skill do proprio dono podia morar, e apagar a quarentena logo apos o
     # smoke tirava a ultima copia dela. Com <LEON_DATA_DIR>/skills-pessoais/ no ar a
     # separacao ja protege o que e do dono, e a limpeza volta a ser segura.
-    if skills_personal_dir_ready; then
+    # SKILLS DO DONO (23/09, desenho estrutural): antes de apagar o backup do catalogo, tudo
+    # nele que nao e do produto (nome fora do catalogo novo e fora de todo catalogo que o produto
+    # ja publicou) vai pra skills-pessoais. Backup que tem coisa do dono NUNCA e apagado: fica
+    # listado em .skills-backups-retidos. Ate a 2.4.48 o catalogo era o unico lugar onde a skill
+    # do dono podia morar, e a casa Claude usa ~/.claude/skills, que e dele tambem.
+    # Dentro de pasta com nome do produto: arquivo que so o backup tem vai pra
+    # skills-pessoais/<nome>.catalogo-antigo-N/; e o backup so e apagado quando e IGUAL ao
+    # catalogo que o produto instalou (registro .skills-catalogo-instalado, gravado aqui mesmo
+    # depois da saude aprovada). Sem registro (casa que veio de versao velha) ou diferente dele
+    # = alguem editou o catalogo: o backup fica.
+    local _sk_rc=0 _sk_reg
+    _sk_reg="$(dirname "${skills_path:-$LEON_DATA_DIR/skills}")/.skills-catalogo-instalado"
+    if [ -n "$skills_backup" ] && [ -d "$skills_backup" ]; then
+      ensure_skills_personal_dir || true
+      leon_preserva skills-do-dono "$skills_backup" "$skills_path" "$(skills_personal_dir)" "$_sk_reg" \
+        >> "$live/upgrade.log" 2>&1 || _sk_rc=$?
+    fi
+    if [ -n "$skills_path" ] && [ -d "$skills_path" ]; then
+      leon_preserva skills-registra "$skills_path" "$_sk_reg" >> "$live/upgrade.log" 2>&1 || true
+    fi
+    if [ "$_sk_rc" = 0 ] && skills_personal_dir_ready; then
       remove_committed_skills_backup "$skills_path" "$skills_backup" || {
         rmdir -- "$lock_dir" 2>/dev/null || true
         trap - RETURN
         return 1
       }
     else
-      printf '%s\n' "$skills_backup" >> "${LEON_DATA_DIR:-$HOME/.leon}/.skills-backups-retidos" 2>/dev/null || true
-      printf '%s [skills] catalogo anterior mantido em quarentena (%s): casa ainda sem skills-pessoais.\n' \
-        "$(date '+%F %T')" "$skills_backup" >> "$live/upgrade.log" 2>/dev/null || true
+      printf '%s\n' "$skills_backup" >> "$LEON_DATA_DIR/.skills-backups-retidos" 2>/dev/null || true
+      printf '%s [skills] catalogo anterior mantido (%s): tem skill do dono (copiada pra skills-pessoais) ou a casa nao tem skills-pessoais (rc=%s).\n' \
+        "$(date '+%F %T')" "$skills_backup" "$_sk_rc" >> "$live/upgrade.log" 2>/dev/null || true
     fi
     # 17/09: a copia em LEON_STATE_DIR virou o ledger VIVO. O marcador sai (ele so
     # autoriza sobrescrever copia NAO promovida). A origem em INSTALL_DIR fica como
@@ -2717,16 +3773,17 @@ LIVE_BASE="$(basename "$INSTALL_DIR")"
 STAGE="$LIVE_PARENT/.${LIVE_BASE}.leon-stage-$TX_ID"
 BACKUP="$LIVE_PARENT/.${LIVE_BASE}.leon-backup-$TX_ID"
 FAILED="$LIVE_PARENT/.${LIVE_BASE}.leon-failed-$TX_ID"
-LEON_DATA_DIR="${LEON_DATA_DIR:-$HOME/.leon}"
-LEON_SKILLS_DIR="${LEON_SKILLS_DIR:-}"
-CODEX_HOME_DIR="${LEON_CODEX_HOME:-$LEON_DATA_DIR/codex}"
-LEON_TMPDIR="${LEON_TMPDIR:-}"
-LEON_WORK_AREA="${LEON_WORK_AREA:-}"
-LEON_STATE_DIR="${LEON_STATE_DIR:-}"
-LEON_MISSIONS_DIR="${LEON_MISSIONS_DIR:-}"
-LEON_PROMISES_DIR="${LEON_PROMISES_DIR:-}"
-LEON_MISSION_OUTPUT_DIR="${LEON_MISSION_OUTPUT_DIR:-}"
-LEON_CODEX_CLI_VERSION="${LEON_CODEX_CLI_VERSION:-}"
+# LEITOR UNICO DAS PASTAS (24/09, rodada 5). Toda pasta sai do .env do dono pelo leitor do
+# bridge (leon_bases_do_dono, bloco LEON-PRESERVA), na ordem do bridge: LEON_DATA_DIR do .env;
+# dele BRAIN_DIR, MEMVIVA_FILE, ASSUNTOS_FILE, LEON_STATE_DIR, LEON_MISSIONS_DIR,
+# LEON_PROMISES_DIR, PERSONA_DIR. O ambiente do processo NAO vale pra casa que tem .env: o vigia
+# antigo exportava a linha crua (aspas e comentario literais) e o bridge ignora o ambiente
+# nessas chaves. Antes, ${LEON_DATA_DIR:-$HOME/.leon} vinha antes de ler o .env e a casa com
+# LEON_DATA_DIR proprio ganhava BRAIN_DIR/PERSONA_DIR/LEON_STATE_DIR de ~/.leon no fim do .env.
+leon_bases_do_dono "$ENV_FILE" \
+  || { printf 'ERRO: nao consegui ler as pastas do .env desta casa.\n' >&2; exit 1; }
+CODEX_HOME_DIR="$LEON_DATA_DIR/codex"
+LEON_CODEX_CLI_VERSION=""
 LEON_CODEX_CLI_MINIMA=""
 CODEX_CLI_ABAIXO_DA_MINIMA=0
 CODEX_CLI_SUBIU=0
@@ -2754,9 +3811,6 @@ BUNDLE_EXTRACT=""
 SKILLS_TMP=""
 SKILLS_EXTRACT=""
 ENV_READ_SAFE=""
-MODEL_SMOKE_HOME=""
-MODEL_SMOKE_DIR=""
-MODEL_SMOKE_OUT=""
 MUTATION_STARTED=0
 COMMIT_LOCK=""
 CRON_ARMED=0
@@ -2828,9 +3882,6 @@ cleanup_main() {
   [ -z "$SKILLS_TMP" ] || rm -f -- "$SKILLS_TMP"
   [ -z "$SKILLS_EXTRACT" ] || rm -rf -- "$SKILLS_EXTRACT"
   [ -z "$ENV_READ_SAFE" ] || rm -f -- "$ENV_READ_SAFE"
-  [ -z "$MODEL_SMOKE_HOME" ] || rm -rf -- "$MODEL_SMOKE_HOME"
-  [ -z "$MODEL_SMOKE_DIR" ] || rm -rf -- "$MODEL_SMOKE_DIR"
-  [ -z "$MODEL_SMOKE_OUT" ] || rm -f -- "$MODEL_SMOKE_OUT"
   # Prefixo de encenacao da subida do CLI: se formos mortos no meio do npm, nao pode sobrar
   # meia instalacao no disco. A release VIVA nunca esta aqui dentro, entao apagar e sempre seguro.
   [ -z "$CODEX_CLI_STAGING" ] || rm -rf -- "$CODEX_CLI_STAGING"
@@ -2912,15 +3963,10 @@ LEON_CODEX_CLI_MINIMA="0.147.0"
 # casa, ao contrario de todas as outras chaves, que usam env_get_from. A casa declarava
 # LEON_CODEX_CLI_VERSION=0.154.0 e tinha a release no disco; o updater assumia 0.147.0, exigia
 # um diretorio que nunca existiu e morria com codigo 1, calado, todas as madrugadas.
-[ -n "$LEON_CODEX_CLI_VERSION" ] || LEON_CODEX_CLI_VERSION="$(env_get_from "$ENV_READ_SAFE" LEON_CODEX_CLI_VERSION)"
+LEON_CODEX_CLI_VERSION="$(env_get_from "$ENV_READ_SAFE" LEON_CODEX_CLI_VERSION)"
 [ -n "$LEON_CODEX_CLI_VERSION" ] || LEON_CODEX_CLI_VERSION="$LEON_CODEX_CLI_MINIMA"
+# catalogo do produto: o .env manda (leon_bases_do_dono); sem a chave, o padrao do bridge
 [ -n "$LEON_SKILLS_DIR" ] || LEON_SKILLS_DIR="$LEON_DATA_DIR/skills"
-[ -n "$LEON_TMPDIR" ] || LEON_TMPDIR="$LEON_DATA_DIR/tmp"
-[ -n "$LEON_WORK_AREA" ] || LEON_WORK_AREA="$HOME/trabalho"
-[ -n "$LEON_STATE_DIR" ] || LEON_STATE_DIR="$LEON_DATA_DIR/state"
-[ -n "$LEON_MISSIONS_DIR" ] || LEON_MISSIONS_DIR="$LEON_STATE_DIR/missions"
-[ -n "$LEON_PROMISES_DIR" ] || LEON_PROMISES_DIR="$LEON_STATE_DIR/promises"
-[ -n "$LEON_MISSION_OUTPUT_DIR" ] || LEON_MISSION_OUTPUT_DIR="$LEON_DATA_DIR/mission-output"
 # 17/09 (causa provada em casa de bancada Claude): a exigencia do Node dedicado estava 19
 # linhas ACIMA do portao por motor, entao valia para a casa Claude tambem. A casa Claude usa o
 # Node do sistema (/usr/bin/node), nunca teve o dedicado, e morria aqui com codigo 1 dizendo
@@ -3007,7 +4053,7 @@ else
 fi
 
 mkdir -p -- "$TX_ROOT" "$CODEX_HOME_DIR" "$LEON_TMPDIR" "$LEON_WORK_AREA" \
-  "$LEON_DATA_DIR/brain" "$LEON_DATA_DIR/persona" "$LEON_MISSIONS_DIR" "$LEON_PROMISES_DIR" "$LEON_MISSION_OUTPUT_DIR"
+  "$BRAIN_DIR" "$PERSONA_DIR" "$LEON_MISSIONS_DIR" "$LEON_PROMISES_DIR" "$LEON_MISSION_OUTPUT_DIR"
 # 0.7: a casa do dono ganha o lugar dele. Fora da transacao de proposito: a pasta
 # pessoal nao entra em rollback, porque o updater nunca a modifica.
 ensure_skills_personal_dir || fatal "nao consegui preparar a pasta de skills pessoais."
@@ -3047,6 +4093,7 @@ if [ -f "$CONFIG_PATH" ]; then
   HAD_CONFIG=1
 fi
 printf '%s\n' "$HAD_CONFIG" > "$TX_DIR/had-config"
+printf '0\n' > "$TX_DIR/config-applied"
 HAD_UNIT=0
 if [ -f "$UNIT_PATH" ]; then
   cp -p -- "$UNIT_PATH" "$TX_DIR/unit.backup" 2>/dev/null || true
@@ -3067,14 +4114,17 @@ RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/leon-release.XXXXXX.json")"
 RELEASE_SIGNATURE="$(mktemp "${TMPDIR:-/tmp}/leon-release.XXXXXX.sig")"
 RELEASE_PUBLIC_KEY="$(mktemp "${TMPDIR:-/tmp}/leon-release.XXXXXX.pem")"
 RELEASE_METADATA="$(mktemp "${TMPDIR:-/tmp}/leon-release.XXXXXX.env")"
-# 02/set: manifesto teimoso (mesma blindagem do baixa_com_espelho) — 5xx/429 momentâneo da
-# central não pode matar o /atualiza. --retry-all-errors + --connect-timeout 20 + --retry 4.
-if ! curl_common -fsSL --max-filesize 524288 --retry 4 --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL --connect-timeout 20 \
-    "$CENTRAL/release-manifest.json" -o "$RELEASE_MANIFEST" \
-   || ! curl_common -fsSL --max-filesize 64 --retry 4 --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL --connect-timeout 20 \
-    "$CENTRAL/release-manifest.sig" -o "$RELEASE_SIGNATURE"; then
-  fatal "a central não entregou o manifesto assinado; runtime preservado."
+# 02/set: manifesto teimoso (mesma blindagem dos downloads de artefato) — 5xx/429 momentâneo da
+# central não pode matar o /atualiza. --retry-all-errors + --retry 4.
+# 23/09 (cliente sem VPS): GitHub primeiro, central de reserva (baixa_manifesto_assinado, na
+# cabeca). A versao instalada entra pra detectar espelho atrasado. Verificacao igual pras duas.
+_INST_PRE="$(read_installed_release_identity "$INSTALL_DIR" 2>/dev/null | cut -f1)" || _INST_PRE=""
+if ! baixa_manifesto_assinado "$CENTRAL" release-manifest.json release-manifest.sig \
+    "$RELEASE_MANIFEST" "$RELEASE_SIGNATURE" 524288 4 "${_INST_PRE:-0.0.0}"; then
+  fatal "nem o espelho no GitHub nem a central entregaram o manifesto assinado; runtime preservado."
 fi
+say "manifesto assinado baixado; origem=$MANIFESTO_ORIGEM${MANIFESTO_NOTA:+ ($MANIFESTO_NOTA)}"
+printf '%s\n' "$MANIFESTO_ORIGEM" > "$TX_DIR/manifesto-origem" 2>/dev/null || true
 validate_download_file "$RELEASE_MANIFEST" 524288 \
   && validate_download_file "$RELEASE_SIGNATURE" 64 64 \
   || fatal "manifesto ou assinatura excede o contrato de transporte; runtime preservado."
@@ -3160,18 +4210,71 @@ release_identity_acceptable "$version" "$RELEASE_MANIFEST_SHA256" "$INSTALLED_RE
 
 TARBALL="$(mktemp "${TMPDIR:-/tmp}/leon-package.XXXXXX.tar.gz")"
 say "baixando pacote para transacao $TX_ID"
-# 02/set: pacote-base é o download SEM espelho (conteúdo pago só na central), então é o que MAIS
-# precisa insistir num soluço momentâneo da central. --retry-all-errors faz o curl repetir sozinho
-# em 5xx/429; --connect-timeout 20 evita pendurar. O [ "$HTTP_CODE" = "200" ] final segue fatal:
-# depois de o curl já ter insistido, um código != 200 aqui é recusa REAL (ex: 403 licença) — aí sim
-# avisar e parar é o certo (não é soluço, é a central dizendo não).
-if ! HTTP_CODE="$(curl_common -sS --max-filesize "$base_bytes" --retry 4 --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL --connect-timeout 20 \
-    --max-time 180 -w '%{http_code}' -o "$TARBALL" \
-    "$CENTRAL/download-codex?email=$EMAIL_ENC")"; then
-  fatal "a internet falhou durante o download; nada foi trocado."
+# PACOTE-BASE (pago). 23/09 (cliente sem VPS): o sha e o tamanho do manifesto assinado decidem
+# se cada fonte vale. Com LEON_LICENCA_ASSINADA=1 e licenca valida conferida OFFLINE (e fora da
+# lista de revogacao assinada, buscada no GitHub primeiro): copia guardada desta casa, depois o
+# pacote cifrado do espelho, e a central por ultimo. Sem licenca assinada (padrao de hoje): a
+# central continua sendo quem libera o pacote (401 a 404 = recusa real, para como antes) e SO
+# quando ela nao responde entra a copia guardada, que o proprio /atualiza grava. "Nao responde"
+# inclui o 5xx do Cloudflare com a VPS fora (521, 522, 523, 524, 530): ver central_fora_http.
+LEON_CACHE_PACOTES="${LEON_CACHE_PACOTES:-$LEON_DATA_DIR/cache/pacotes}"
+BASE_ORIGEM=""
+LIC_CHAVE_PACOTE="-"
+if [ "$(env_get_from "$ENV_READ_SAFE" LEON_LICENCA_ASSINADA 2>/dev/null)" = 1 ]; then
+  _LIC_REV="$(mktemp "${TMPDIR:-/tmp}/leon-revogadas.XXXXXX")"
+  baixa_revogacao "$CENTRAL" "$_LIC_REV"
+  _LIC_RC=0
+  _LIC_INFO="$(licenca_confere "$LEON_STATE_DIR/licenca-assinada.json" "$_LIC_REV" "$LEON_STATE_DIR")" || _LIC_RC=$?
+  rm -f -- "$_LIC_REV"
+  case "$_LIC_RC" in
+    0) IFS=$'\t' read -r _LIC_ID _LIC_ATE _LIC_VENC LIC_CHAVE_PACOTE <<< "$_LIC_INFO"
+       if [ "$_LIC_VENC" = 1 ]; then
+         # vencida: nao abre o pacote cifrado; segue o caminho da central (que renova) e, sem ela,
+         # a copia guardada, igual a casa sem licenca assinada.
+         say "licenca assinada ${_LIC_ID} VENCIDA em ${_LIC_ATE}; sigo pelo caminho da central"; _LIC_RC=1
+       else
+         say "licenca assinada conferida offline (${_LIC_ID}, valida ate ${_LIC_ATE})"
+       fi ;;
+    3) fatal "a licenca desta casa esta na lista de revogacao assinada; nada foi trocado." ;;
+    *) say "licenca assinada ausente ou invalida; sigo pelo caminho da central" ;;
+  esac
+  if [ "$_LIC_RC" = 0 ]; then
+    if pacote_do_cache "$base_sha256" "$base_bytes" "$TARBALL"; then BASE_ORIGEM=cache
+    elif pacote_cifrado_do_espelho leon-base-curated.tar.gz "$base_sha256" "$base_bytes" "$TARBALL" "$LIC_CHAVE_PACOTE"; then BASE_ORIGEM=espelho-cifrado
+    fi
+  fi
 fi
-[ "$HTTP_CODE" = "200" ] || fatal "a central recusou o download (HTTP $HTTP_CODE); nada foi trocado."
+if [ -z "$BASE_ORIGEM" ]; then
+  # 02/set: a central insiste num soluco momentaneo (--retry-all-errors em 5xx/429). Recusa
+  # EXPLICITA da licenca (401, 402, 403, 404) para, como antes. 23/09 noite (revisor): a central
+  # fica atras do Cloudflare, e com a VPS fora ele RESPONDE (521, 522, 523, 524, 530), nao fica
+  # mudo. Por isso "central fora" e qualquer 5xx, o 408, o 429, sem codigo (000) ou transferencia
+  # quebrada: a copia guardada do mesmo sha assume; sem copia, para com motivo claro. Com copia
+  # guardada boa, uma tentativa so (cada 522 do Cloudflare leva uns 15 s).
+  _TENT_BASE=4
+  if [ -n "${LEON_CACHE_PACOTES:-}" ] && [ -f "$LEON_CACHE_PACOTES/$base_sha256" ] \
+     && confere_sha_tamanho "$LEON_CACHE_PACOTES/$base_sha256" "$base_sha256" "$base_bytes"; then
+    _TENT_BASE=1
+  fi
+  _CURL_RC=0
+  HTTP_CODE="$(curl_common -sS --max-filesize "$base_bytes" --retry "$_TENT_BASE" --retry-delay 2 --retry-connrefused $CURL_RETRY_ALL --connect-timeout 10 \
+      --max-time 180 -w '%{http_code}' -o "$TARBALL" \
+      "$CENTRAL/download-codex?email=$EMAIL_ENC")" || _CURL_RC=$?
+  if [ "$HTTP_CODE" = 200 ] && [ "$_CURL_RC" = 0 ]; then
+    BASE_ORIGEM=central
+  elif central_fora_http "$HTTP_CODE" "$_CURL_RC"; then
+    say "   a central nao respondeu de verdade (HTTP ${HTTP_CODE:-000}, curl $_CURL_RC); tento a copia guardada do pacote-base"
+    pacote_do_cache "$base_sha256" "$base_bytes" "$TARBALL" \
+      || fatal "a central nao respondeu (HTTP ${HTTP_CODE:-000}) e esta casa ainda nao tem copia guardada deste pacote-base; nada foi trocado."
+    BASE_ORIGEM=cache
+  else
+    fatal "a central recusou o download (HTTP $HTTP_CODE); nada foi trocado."
+  fi
+fi
 verify_signed_artifact "$TARBALL" "$base_sha256" "$base_bytes" "pacote-base"
+say "   pacote-base: origem=$BASE_ORIGEM"
+printf '%s\n' "$BASE_ORIGEM" > "$TX_DIR/origem-base" 2>/dev/null || true
+guarda_pacote_no_cache "$TARBALL" "$base_sha256"
 
 if ! "$PYTHON_BIN" - "$TARBALL" <<'PY'
 import posixpath, re, sys, tarfile
@@ -3309,7 +4412,7 @@ fi
 # Aprovada: agora sim as pecas entram na persona viva (mesmo efeito de antes, uma etapa depois).
 for _peca in NUCLEO-LEON.md _MOTOR-CLAUDE.md _MOTOR-CODEX.md _REGRAS-DURAS.md CAMINHOS-CANONICOS.md; do
   if [ -f "$STAGE/$_peca" ]; then
-    install -m 0600 "$STAGE/$_peca" "$LEON_DATA_DIR/persona/$_peca" 2>/dev/null || true
+    install -m 0600 "$STAGE/$_peca" "$PERSONA_DIR/$_peca" 2>/dev/null || true
     rm -f -- "$STAGE/$_peca"
   fi
 done
@@ -3325,20 +4428,26 @@ unset _m
 # faz falta: sem candidato gerado, o commit la embaixo simplesmente nao o aplica (o passo
 # ja era condicionado ao arquivo existir).
 if [ "$LEON_ENGINE_CASA" = codex ]; then
-  write_codex_config_candidate "$TX_DIR/config.candidate" \
+  # o molde vai sempre pro smoke do modelo; o candidato so existe no CODEX_HOME do LEON.
+  write_codex_config_candidate "$TX_DIR/config.molde" \
     || fatal "não consegui gerar o perfil Codex root-deny canônico."
-  leva_mcp_do_dono "$CONFIG_PATH" "$TX_DIR/config.candidate" \
-    || fatal "não consegui levar as integrações MCP do dono pro config.toml novo; nada foi trocado."
+  if codex_home_do_dono; then
+    say "   config.toml: o CODEX_HOME desta casa é do dono ($(leon_preserva codex-home-do-dono "$ENV_READ_SAFE" "$LEON_DATA_DIR" 2>/dev/null)); não escrevo config.toml nenhum."
+  else
+    funde_config_do_dono "$CONFIG_PATH" "$TX_DIR/config.molde" "$TX_DIR/config.candidate" \
+      || fatal "não consegui juntar o config.toml do dono com o molde; nada foi trocado."
+  fi
 fi
 
 # O bridge v2 depende do adapter e do shim da mesma versão. Baixamos um bundle
 # indivisível, validamos hash, lista exata e sintaxe, e só então sobrepomos o stage.
 BUNDLE_TMP="$(mktemp "${TMPDIR:-/tmp}/leon-codex-v2.XXXXXX.tar.gz")"
-# o cap de transporte (--max-filesize) e aplicado dentro de baixa_com_espelho, nos DOIS
-# caminhos (central e espelho), com o valor passado no terceiro argumento.
-if ! baixa_com_espelho "$bundle_url" "$BUNDLE_TMP" "$bundle_bytes"; then
+# GitHub primeiro, central de reserva; so aceita o que bate sha e tamanho do manifesto.
+if ! baixa_artefato_verificado "$CENTRAL" "$bundle_url" "$BUNDLE_TMP" "$bundle_bytes" "$bundle_sha256" "$bundle_bytes" 4; then
   fatal "não consegui baixar o runtime Codex v2 completo."
 fi
+say "   bundle: origem=$ARTEFATO_ORIGEM"
+printf '%s\n' "$ARTEFATO_ORIGEM" > "$TX_DIR/origem-bundle" 2>/dev/null || true
 verify_signed_artifact "$BUNDLE_TMP" "$bundle_sha256" "$bundle_bytes" "runtime Codex v2"
 
 if ! "$PYTHON_BIN" - "$BUNDLE_TMP" <<'PY'
@@ -3362,7 +4471,8 @@ required = {
     "smoke/appserver-smoke.cjs",
     "workers/piper.js",
 }
-directories = {"appserver", "lib", "lib-motores", "smoke", "workers"}
+directories = {"appserver", "lib", "lib-motores", "smoke", "workers",
+               "leon2", "leon2/bin", "leon2/lib", "leon2/nucleo", "leon2/nucleo/papeis"}  # LEON 2.0 (2.7.0)
 try:
     members = tarfile.open(sys.argv[1], "r:gz").getmembers()
 except (OSError, tarfile.TarError):
@@ -3411,10 +4521,11 @@ for runtime_js in bridge.cjs appserver/adapter.cjs lib/onboarding.js lib/inbound
 done
 LEGACY_NAME='open''claw'
 if LC_ALL=C grep -Rqi -- "$LEGACY_NAME" "$BUNDLE_EXTRACT" \
-   || LC_ALL=C grep -Rq --exclude='claude.cjs' -- 'bypassPermissions' "$BUNDLE_EXTRACT" \
+   || LC_ALL=C grep -Rq --exclude='claude.cjs' --exclude='motor-claude.cjs' -- 'bypassPermissions' "$BUNDLE_EXTRACT" \
    || LC_ALL=C grep -R -l --binary-files=text -- "$DANGEROUS_FLAG" "$BUNDLE_EXTRACT" >/dev/null 2>&1 \
-   || ! grep -q 'const LEON_CODEX_ONLY = true' "$BUNDLE_EXTRACT/bridge.cjs" \
-   || ! grep -q 'criaMotor' "$BUNDLE_EXTRACT/bridge.cjs" \
+   || { bridge_e_leon2 "$BUNDLE_EXTRACT/bridge.cjs" && ! leon2_sintaxe_ok "$BUNDLE_EXTRACT"; } \
+   || { ! bridge_e_leon2 "$BUNDLE_EXTRACT/bridge.cjs" && ! grep -q 'const LEON_CODEX_ONLY = true' "$BUNDLE_EXTRACT/bridge.cjs"; } \
+   || { ! bridge_e_leon2 "$BUNDLE_EXTRACT/bridge.cjs" && ! grep -q 'criaMotor' "$BUNDLE_EXTRACT/bridge.cjs"; } \
    || ! [ -s "$BUNDLE_EXTRACT/lib-motores/index.cjs" ]; then
   fatal "o runtime Codex v2 reprovou a auditoria de identidade ou permissão."
 fi
@@ -3427,11 +4538,12 @@ BUNDLE_TMP=""
 # Catálogo mínimo Codex: somente o artefato coberto pelo manifesto assinado.
 # Não existe clone, overlay nem reaproveitamento de scripts do catálogo antigo.
 SKILLS_TMP="$(mktemp "${TMPDIR:-/tmp}/leon-skills.XXXXXX.tar.gz")"
-# o cap de transporte (--max-filesize) e aplicado dentro de baixa_com_espelho, nos DOIS
-# caminhos (central e espelho), com o valor passado no terceiro argumento.
-if ! baixa_com_espelho "$skills_url" "$SKILLS_TMP" "$skills_bytes"; then
+# GitHub primeiro, central de reserva; so aceita o que bate sha e tamanho do manifesto.
+if ! baixa_artefato_verificado "$CENTRAL" "$skills_url" "$SKILLS_TMP" "$skills_bytes" "$skills_sha256" "$skills_bytes" 4; then
   fatal "não consegui baixar o catálogo Codex assinado."
 fi
+say "   skills: origem=$ARTEFATO_ORIGEM"
+printf '%s\n' "$ARTEFATO_ORIGEM" > "$TX_DIR/origem-skills" 2>/dev/null || true
 verify_signed_artifact "$SKILLS_TMP" "$skills_sha256" "$skills_bytes" "catálogo de skills"
 audit_skills_archive "$SKILLS_TMP" \
   || fatal "o catálogo de skills contém membros inseguros ou incompletos."
@@ -3461,11 +4573,12 @@ rm -f -- "$SKILLS_TMP"
 SKILLS_TMP=""
 
 UPDATE_TMP="$(mktemp "${TMPDIR:-/tmp}/leon-updater.XXXXXX.sh")"
-# o cap de transporte (--max-filesize) e aplicado dentro de baixa_com_espelho, nos DOIS
-# caminhos (central e espelho), com o valor passado no terceiro argumento.
-if ! baixa_com_espelho "$updater_url" "$UPDATE_TMP" "$updater_bytes"; then
+# GitHub primeiro, central de reserva; so aceita o que bate sha e tamanho do manifesto.
+if ! baixa_artefato_verificado "$CENTRAL" "$updater_url" "$UPDATE_TMP" "$updater_bytes" "$updater_sha256" "$updater_bytes" 4; then
   fatal "não consegui baixar o atualizador candidato assinado."
 fi
+say "   updater: origem=$ARTEFATO_ORIGEM"
+printf '%s\n' "$ARTEFATO_ORIGEM" > "$TX_DIR/origem-updater" 2>/dev/null || true
 verify_signed_artifact "$UPDATE_TMP" "$updater_sha256" "$updater_bytes" "atualizador candidato"
 if [ ! -s "$UPDATE_TMP" ] \
    || LC_ALL=C grep -q -- "$DANGEROUS_FLAG" "$UPDATE_TMP" \
@@ -3479,7 +4592,7 @@ chmod 0600 "$STAGE/.leon-release-version"
 write_release_identity "$STAGE/.leon-release.json" "$version" "$RELEASE_MANIFEST_SHA256"
 write_runtime_files_manifest "$STAGE"
 chmod 0700 "$STAGE/update-pago.sh"
-chmod u+x "$STAGE"/*.sh "$STAGE"/scripts/*.sh 2>/dev/null || true
+chmod u+x "$STAGE"/*.sh "$STAGE"/scripts/*.sh "$STAGE"/leon2/bin/* 2>/dev/null || true
 find "$STAGE" -xdev -type d -exec chmod go-rwx {} +
 find "$STAGE" -xdev -type f -exec chmod go-rwx {} +
 "$NODE_BIN" --check "$STAGE/bridge.cjs" >/dev/null 2>&1 \
@@ -3495,8 +4608,12 @@ find "$STAGE" -xdev -type f -exec chmod go-rwx {} +
   || fatal "o stage perdeu uma peça obrigatória do runtime app-server."
 "$NODE_BIN" --check "$STAGE/workers/piper.js" >/dev/null 2>&1 \
   || fatal "o worker Piper preparado falhou no último teste de sintaxe."
-grep -q 'const LEON_CODEX_ONLY = true' "$STAGE/bridge.cjs" \
-  || fatal "o stage não é Codex-only."
+if bridge_e_leon2 "$STAGE/bridge.cjs"; then
+  leon2_sintaxe_ok "$STAGE" || fatal "o LEON 2.0 preparado falhou no último teste de sintaxe."
+else
+  grep -q 'const LEON_CODEX_ONLY = true' "$STAGE/bridge.cjs" \
+    || fatal "o stage não é Codex-only."
+fi
 bash -n "$STAGE/update-pago.sh" || fatal "o atualizador preparado falhou no último teste de sintaxe."
 BRIDGE_SHA="$(sha256sum "$STAGE/bridge.cjs" | awk '{print $1}')"
 printf '%s\n' "$BRIDGE_SHA" > "$TX_DIR/bridge-sha256"
@@ -3506,23 +4623,6 @@ printf '%s\n' "$BRIDGE_SHA" > "$TX_DIR/bridge-sha256"
 # versao: os bundles publicados hoje sao todos da familia LEGADA.
 LEDGER_FAMILIA_ENTRANTE="$(familia_do_bridge "$STAGE/bridge.cjs")"
 printf '%s\n' "$LEDGER_FAMILIA_ENTRANTE" > "$TX_DIR/ledger-familia-entrante"
-
-# O modelo e a sessão persistente são provados no stage, com cópia efêmera e
-# segura da autenticação. Falha de acesso ao modelo nunca cai para outro modelo.
-#
-# 02/set (caso LEON 99 + decisão do dono): este smoke era FATAL — login do modelo
-# vencido (ou soluço momentâneo da OpenAI) CANCELAVA o /atualiza inteiro, mesmo com
-# a versão nova perfeita e o robô rodando bem antes. Trava clientes na versão velha
-# à toa, e login vencido precisa ser renovado de qualquer jeito (atualizando ou não).
-# Agora é AVISO, não veto: se o modelo não responde, marca a pendência e SEGUE o update;
-# o cliente recebe as correções e um aviso forte pra renovar o login no fim (pós-sucesso).
-# Os DEMAIS smokes (sintaxe, peças obrigatórias, Codex-only) continuam FATAIS — só o
-# gate de LOGIN do modelo deixou de bloquear, porque não é sobre a release ser boa.
-SMOKE_MODELO_OK=1
-if ! run_candidate_model_smoke "$STAGE" "$TX_DIR"; then
-  SMOKE_MODELO_OK=0
-  say "⚠️ smoke do modelo NÃO passou (login/${CODEX_MODEL_EFETIVO:-gpt-5.6-sol} indisponível) — NÃO é fatal: sigo o update e aviso o dono pra renovar o login."
-fi
 
 # A copia que o cron executa fica fora do runtime que sera trocado.
 cp -- "$SCRIPT_PATH" "$TX_DIR/finalize.sh"
@@ -3656,8 +4756,9 @@ if { [ "$LEON_ENGINE_CASA" = claude ] || [ -n "$CLAUDE_BIN_ATUAL" ]; } \
   fi
 fi
 
+ENV_RECUSA=""
 rewrite_runtime_env "$STAGE/.env" \
-  || fatal "o .env atual não pôde ser reduzido à configuração suportada; runtime preservado."
+  || fatal "o teu .env tem linha que a versão nova recusaria (${ENV_RECUSA:-motivo não registrado}). Não mexi em nada: corrija essa linha e rode /atualiza de novo."
 
 # ---- LEDGER DE SALAS: FAMILIA INSTALADA E PRE-CHECAGENS (17/09) ------------
 # POR QUE EXATAMENTE AQUI: e o ultimo ponto com a casa INTACTA (MUTATION_STARTED
@@ -3688,9 +4789,8 @@ fi
 # Onde o runtime ENTRANTE vai LER o ledger depois do commit.
 if [ "$LEDGER_FAMILIA_ENTRANTE" = nova ]; then
   # Destino LIDO do .env do stage, NUNCA recalculado: e exatamente a variavel que
-  # o bridge novo resolve. filter_user_env descarta LEON_STATE_DIR, LEON_DATA_DIR
-  # e LEON_SESSIONS_FILE vindos do dono, o bloco gerenciado grava a nossa e a unit
-  # nao tem EnvironmentFile. Sem override de operador: na casa do cliente nao ha
+  # o bridge novo resolve: o .env do stage e o do dono (as linhas dele intactas) mais o que
+  # faltava, e a unit nao tem EnvironmentFile. Sem override de operador: na casa do cliente nao ha
   # operador pra corrigir um palpite errado.
   LEDGER_STATE_DIR="$(safe_env_value "$STAGE/.env" LEON_STATE_DIR 2>/dev/null || true)"
   case "$LEDGER_STATE_DIR" in
@@ -3710,12 +4810,11 @@ if [ "$LEDGER_FAMILIA_ENTRANTE" = nova ]; then
       LEDGER_DESTINO="$LEDGER_SESSOES_DECLARADO"
       say "   conversas: o runtime novo vai ler o arquivo que o teu .env declara ($LEDGER_DESTINO)."
     else
-      # O runtime novo recusaria este caminho no boot (exit 78) e a casa nao subiria.
-      # Guardo a linha com o valor intacto e sigo pelo padrao, sem abortar.
-      env_guarda_chave "$STAGE/.env" LEON_SESSIONS_FILE migrado \
-        || fatal "não consegui guardar com segurança a linha que redireciona o arquivo de conversas; runtime preservado."
-      LEDGER_DESTINO="$LEDGER_STATE_DIR/sessions.json"
-      say "   conversas: o caminho declarado no teu .env ($LEDGER_SESSOES_DECLARADO) não cabe onde o runtime novo lê; guardei a linha (nada foi apagado) e sigo por $LEDGER_DESTINO."
+      # O runtime novo recusaria este caminho no boot (exit 78) e a casa nao subiria. A linha
+      # e do dono (23/09): comentar ou trocar seria mexer no .env dele. Paro ANTES de mutar
+      # qualquer coisa e digo o que mudar; a casa segue na versao de hoje, inteira.
+      report_diagnostico_from_tx "$TX_DIR" erro "LEON_SESSIONS_FILE do dono fora de LEON_STATE_DIR; nada trocado" || true
+      fatal "o teu .env manda as conversas para $LEDGER_SESSOES_DECLARADO, e a versão nova só lê conversas dentro de $LEDGER_STATE_DIR. Não mexi no teu .env nem em nada: ajuste LEON_SESSIONS_FILE (ou apague a linha) e rode /atualiza de novo."
     fi
   else
     LEDGER_DESTINO="$LEDGER_STATE_DIR/sessions.json"
@@ -3801,6 +4900,11 @@ if [ "${LEON_TEST_FAIL_AT:-}" = "after_skills" ]; then
   fatal "falha injetada depois da troca de skills."
 fi
 if [ -f "$TX_DIR/config.candidate" ]; then
+  # Marca ANTES de trocar: a volta so restaura o config.toml que ESTA transacao trocou.
+  printf '1\n' > "$TX_DIR/config-applied"
+  if [ -f "$TX_DIR/config-ilegivel" ] && [ -f "$CONFIG_PATH" ]; then
+    cp -p -- "$CONFIG_PATH" "${CONFIG_PATH}.ilegivel-$TX_ID"
+  fi
   install -m 0600 "$TX_DIR/config.candidate" "${CONFIG_PATH}.leon-new-$TX_ID"
   mv -f -- "${CONFIG_PATH}.leon-new-$TX_ID" "$CONFIG_PATH"
 fi
@@ -3936,27 +5040,16 @@ fi
 if [ "$CLAUDE_CLI_ABAIXO_DA_MINIMA" = "1" ] && [ "$CLAUDE_CLI_SUBIU" = "0" ] && [ "$LEON_ENGINE_CASA" = claude ]; then
   notify_from_runtime "$INSTALL_DIR" "✅ Atualizado! Um detalhe: o programa do Claude desta casa (${CLAUDE_CLI_VERSAO_ATUAL:-versão desconhecida}) é mais velho que o mínimo ($LEON_CLAUDE_CLI_MINIMA) e não consegui atualizar agora (deve ter sido rede). Se o Opus for recusado eu sigo no Sonnet sozinho e tento atualizar o programa em segundo plano; se não der, eu te aviso." "$THREAD_ARG" "$CHAT_ARG" || true
 fi
-# 3a) AVISO DE LOGIN DO MODELO (02/set): o smoke do modelo virou aviso (não veto).
-# Se ele não passou lá na FASE 4, o update seguiu e chegou até aqui (versão nova no ar),
-# mas o robô pode não conseguir responder ao cliente até o login ser renovado. Avisa CLARO,
-# best-effort. A mensagem é AUTOSSUFICIENTE (Fable): se o login venceu o robô fica mudo e o
-# cliente não pode perguntar como — então já aponta o caminho concreto (a página de instalação,
-# que o cliente recebeu no e-mail; rodar o comando de novo refaz SÓ o login, sem quebrar nada).
-if [ "${SMOKE_MODELO_OK:-1}" = "0" ]; then
-  # Rastro em disco (ademais do aviso): o /status e o raio-x da frota leem isso pra
-  # enxergar login vencido DEPOIS do update, nao so no instante. Apagado no else quando
-  # o smoke passa. Leitor no bridge (/status) le {visto_em,modelo}.
-  printf '{"visto_em":%s,"modelo":"%s"}\n' "$(date +%s)" "${CODEX_MODEL_EFETIVO:-gpt-5.6-sol}" > "$INSTALL_DIR/.login-modelo-vencido.json" 2>/dev/null || true
-  notify_from_runtime "$INSTALL_DIR" "✅ Me atualizei pra última versão e as correções já estão no ar! Só um aviso importante: não consegui confirmar o acesso ao modelo de IA agora — o mais provável é que teu login do ChatGPT tenha vencido. A solução é rápida e SEM terminal: me manda /login aqui no Telegram que eu te passo um link pra reconectar (você entra no ChatGPT e autoriza, leva 1 min). Nada seu se perde, é só reconectar. (Se preferir, dá pra refazer pela página de instalação do teu e-mail também, mas o /login aqui é mais simples.)" "$THREAD_ARG" "$CHAT_ARG" || true
-else
-  rm -f "$INSTALL_DIR/.login-modelo-vencido.json" 2>/dev/null || true
-fi
+# 3a) (27/09) o teste do modelo com copia do login saiu do /atualiza: o Codex podia renovar o token
+# na copia e deixar o login do dono com um token ja gasto. Login vencido o proprio agente avisa na
+# primeira resposta. A marca velha de login vencido sai.
+rm -f "$INSTALL_DIR/.login-modelo-vencido.json" 2>/dev/null || true
 # 3b) MODELO DE AUDIO NATIVO (25/08, caso Leticia): casa instalada antes do fix
 # nao tem o modelo whisper — o 1o audio do cliente dispara download de 464MB DENTRO
 # do bridge rodando (pico ~580MB de RAM = perfil de OOM em VPS pequena). Baixa AGORA,
 # fora do bridge, com teto de tempo. Idempotente: cache pronto = sai na hora.
-if [ -x "$HOME/.leon/whisper-venv/bin/python3" ]; then
-  timeout 600 "$HOME/.leon/whisper-venv/bin/python3" - <<'PYMODEL' >/dev/null 2>&1 && say "   modelo de audio pronto (transcricao nativa)." || true
+if [ -x "$LEON_DATA_DIR/whisper-venv/bin/python3" ]; then
+  timeout 600 "$LEON_DATA_DIR/whisper-venv/bin/python3" - <<'PYMODEL' >/dev/null 2>&1 && say "   modelo de audio pronto (transcricao nativa)." || true
 from faster_whisper import WhisperModel
 WhisperModel("small", device="cpu", compute_type="int8")
 PYMODEL

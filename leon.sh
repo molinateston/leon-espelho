@@ -4,8 +4,12 @@
 # O dono cola UMA linha no Terminal do navegador (Hostinger) e responde o que este
 # script perguntar. Nada de editar comando, nada de aspas, nada de WSL.
 #
-# Uso oficial (o que a página manda colar):
-#   curl -fsSL https://licenca.leonardomolina.com.br/leon.sh | bash
+# Uso oficial (o que a página manda colar). 23/09, lei do dono: cliente nenhum depende da VPS
+# do dono; o comando sai do GitHub e a central fica de reserva:
+#   curl -fsSL https://raw.githubusercontent.com/molinateston/leon-espelho/main/leon.sh | bash
+# (o endereço antigo, https://licenca.leonardomolina.com.br/leon.sh, continua valendo.)
+# Com licença assinada (LEON_LICENCA_ASSINADA, quando o dono ligar), a instalação inteira sai
+# do GitHub, sem a central: cole a licença que chegou na compra em LEON_LICENCA=... antes do bash.
 #
 # A prova de erro: cada tropeço que um cliente real viveu virou uma trava aqui.
 #  - lixo do "colar" do terminal do navegador (^[[200~ e afins): sanitizado em toda leitura.
@@ -18,6 +22,7 @@ set -uo pipefail
 
 SUPORTE="https://wa.me/5511988890934"
 CENTRAL="${LEON_CENTRAL:-https://licenca.leonardomolina.com.br}"
+ESPELHO="${LEON_ESPELHO:-https://raw.githubusercontent.com/molinateston/leon-espelho/main}"
 
 vermelho() { printf '\033[1;31m%s\033[0m\n' "$*"; }
 verde()    { printf '\033[1;32m%s\033[0m\n' "$*"; }
@@ -182,12 +187,23 @@ echo ""
 
 INSTALADOR="$(mktemp /tmp/leon-install.XXXXXX.sh)"
 trap 'rm -f -- "$INSTALADOR"' EXIT
-curl -fsSL --retry 3 --retry-delay 2 --max-time 120 "$CENTRAL/install-leon.sh" -o "$INSTALADOR" </dev/null \
-  || morre "não consegui baixar o instalador (a VPS está sem internet?)."
+# GitHub primeiro, central de reserva. O instalador baixado confere, ele mesmo, a assinatura de
+# tudo o que baixa depois (manifesto pela chave pinada, pacotes pelo sha do manifesto).
+ORIGEM_INST=github
+if ! curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 120 "$ESPELHO/install-leon.sh" -o "$INSTALADOR" </dev/null \
+   || ! bash -n "$INSTALADOR" 2>/dev/null; then
+  ORIGEM_INST=central
+  curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 120 "$CENTRAL/install-leon.sh" -o "$INSTALADOR" </dev/null \
+    || morre "não consegui baixar o instalador nem do GitHub nem da central (a VPS está sem internet?)."
+fi
 bash -n "$INSTALADOR" || morre "o instalador baixou corrompido. Rode o mesmo comando de novo."
+echo "  instalador baixado (origem: $ORIGEM_INST)"
 
 export LEON_ENGINE="$ENGINE" EMAIL="$EMAIL" NOME="$NOME" GENDER="$GENDER" BOT_TOKEN="$TOKEN"
+export LEON_ESPELHO="$ESPELHO"
 [ -n "$DONO" ] && export OWNER_CHAT_ID="$DONO"
+# licença assinada (G3): só atravessa se veio no comando; o instalador confere offline.
+if [ -n "${LEON_LICENCA:-}" ]; then export LEON_LICENCA="$(limpa "$LEON_LICENCA")" LEON_LICENCA_ASSINADA=1; fi
 bash "$INSTALADOR"
 RC=$?
 
