@@ -3346,6 +3346,23 @@ grava_licenca_assinada() {
   fi
 }
 
+# (01/10, caso Delano) casa vinda de 2.7.x por atualizacao tem os arquivos do pacote 0400/0444 do dono
+# (o bundle vem 0444 e o atualizador tira go-rwx) e o cp -a por cima abortava com "Permissao negada".
+# Devolve a escrita SO no que o cp vai sobrescrever: caminho da casa sem escrita que a origem tambem traz
+# (arquivo: u+w; diretorio: u+wx). Varre so a casa, sem seguir link nem sair do disco; o que e so do dono
+# fica com o modo que tinha.
+libera_escrita_do_pacote() {  # libera_escrita_do_pacote <origem> <casa>
+  local _rel
+  [ -d "$1" ] && [ -d "$2" ] && [ ! -L "$2" ] || return 0
+  while IFS= read -r -d '' _rel; do
+    if [ -f "$1/$_rel" ] && [ ! -L "$1/$_rel" ] && [ -f "$2/$_rel" ] && [ ! -L "$2/$_rel" ]; then
+      chmod u+w -- "$2/$_rel" 2>/dev/null || true
+    elif [ -d "$1/$_rel" ] && [ ! -L "$1/$_rel" ] && [ -d "$2/$_rel" ] && [ ! -L "$2/$_rel" ]; then
+      chmod u+wx -- "$2/$_rel" 2>/dev/null || true
+    fi
+  done < <(find -P "$2" -xdev \( \( -type f ! -perm -u+w \) -o \( -type d \( ! -perm -u+w -o ! -perm -u+x \) \) \) -printf '%P\0' 2>/dev/null)
+}
+
 baixa_runtime_codex() {
   echo ""
   echo ">> validando compra e baixando motor Codex (release assinada)..."
@@ -3467,6 +3484,7 @@ PY
     rm -rf -- "$STAGE" "$TARBALL"
     exit 1
   fi
+  libera_escrita_do_pacote "$INNER" "$INSTALL_DIR"
   cp -a "$INNER"/. "$INSTALL_DIR"/
   # 17/09: "cp -a INNER/." carrega o MODO do diretorio de origem pro destino, e INNER
   # sai do tar --no-same-permissions sob o umask de login (022) de um tarball cuja raiz
@@ -3612,6 +3630,7 @@ PY
   fi
   BUNDLE_EXTRACT=$(mktemp -d)
   tar --no-same-owner --no-same-permissions -xzf "$BUNDLE_TMP" -C "$BUNDLE_EXTRACT"
+  libera_escrita_do_pacote "$BUNDLE_EXTRACT" "$INSTALL_DIR"
   cp -a "$BUNDLE_EXTRACT"/. "$INSTALL_DIR"/
   # 17/09 (medido na bancada): este e o TERCEIRO cp -a para a casa e era o unico sem chmod.
   # O tarball do bundle traz um membro "./", entao o tar sobe o diretorio de extracao para 755
@@ -3751,6 +3770,7 @@ PY
       echo "ERRO: tarball sem conteudo esperado." >&2
       exit 1
     fi
+    libera_escrita_do_pacote "$INNER" "$INSTALL_DIR"
     cp -a "$INNER"/. "$INSTALL_DIR"/
     # 17/09: mesmo motivo do outro cp -a, o modo 755 do diretorio raiz do tarball
     # vazava pra casa do cliente. So o diretorio de cima, nunca -R.
