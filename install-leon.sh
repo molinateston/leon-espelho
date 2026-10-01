@@ -3117,6 +3117,11 @@ WHISPER_SETUP
     exit 1
   fi
 
+  # 30/09 (cliente real): arquivo do root dentro da casa (comando antigo rodado como root) barrava o cp da
+  # fase do usuario com "Permissao negada". A casa volta pro usuario antes do pulo; -h nao segue link.
+  if [ -d "$INSTALL_DIR_TMP" ] && [ ! -L "$INSTALL_DIR_TMP" ]; then
+    find "$INSTALL_DIR_TMP" -xdev ! -user "$LEON_USER" -exec chown -h "$LEON_USER:$LEON_USER" {} + 2>/dev/null || true
+  fi
   echo ""
   echo "========================================"
   echo "  PASSO ROOT · CONCLUIDO"

@@ -4715,6 +4715,68 @@ elif [ ! -e "$STAGE/.onboarding-state.json" ]; then
   chmod 0600 "$STAGE/.onboarding-state.json"
 fi
 
+# ARQUIVOS DO DONO (30/09, perdeu-275): a troca de pastas levava so a lista fechada de estado e o resto
+# do dono (rotinas, scripts, logs, .meta-account-policy.json) ficava preso no backup. Agora o que a casa
+# tem e o pacote nao traz entra no stage SEM sobrescrever nada (casa e produto vencem), como a reinstala
+# (install-leon.sh cp -a por cima). Troca aceita: extras da casa velha atravessam (bridge.cjs so confere
+# o manifesto; nada carrega workers ou lib por listagem; node_modules da casa atravessa e o npm do pg nao
+# roda). Nao seguem symlink; socket e fifo ficam. Erro de escrita sai 1; sem espaco (ENOSPC) sai 3.
+funde_casa() {  # funde_casa <origem> <stage> [caminho relativo que fica de fora...]: imprime quantos entraram
+  "${PYTHON_BIN:-python3}" - "$@" <<'LEON_FUNDE_PY'
+import errno, os, shutil, stat, sys
+src, dst, pula = sys.argv[1], sys.argv[2], set(sys.argv[3:])
+raiz, novas, n = os.geteuid() == 0, [], 0
+def sai(e): sys.stderr.write('funde_casa: %s\n' % e); sys.exit(3 if e.errno in (errno.ENOSPC, errno.EDQUOT) else 1)
+for d, subs, arqs in os.walk(src):
+    rel = os.path.relpath(d, src); alvo = os.path.normpath(os.path.join(dst, rel)); m = os.lstat(alvo).st_mode
+    if not stat.S_ISDIR(m): subs[:] = []; continue
+    desce = []
+    for nome in subs + arqs:
+        r, s, t = os.path.normpath(os.path.join(rel, nome)), os.path.join(d, nome), os.path.join(alvo, nome)
+        try: st = os.lstat(s)
+        except FileNotFoundError: continue
+        eh_dir = stat.S_ISDIR(st.st_mode)
+        if r in pula or (os.path.lexists(t) and not eh_dir): continue
+        if not (eh_dir or stat.S_ISLNK(st.st_mode) or stat.S_ISREG(st.st_mode) and os.access(s, os.R_OK)): continue
+        try:
+            if eh_dir:
+                if not os.path.lexists(t): os.mkdir(t, 0o700); novas.append((t, st))
+                desce.append(nome); continue
+            os.symlink(os.readlink(s), t) if stat.S_ISLNK(st.st_mode) else shutil.copy2(s, t)
+            if raiz: os.lchown(t, st.st_uid, st.st_gid)
+        except OSError as e:
+            if os.path.lexists(t) and not eh_dir: os.unlink(t)
+            if os.path.lexists(s): sai(e)
+            continue
+        n += 1
+    subs[:] = desce
+for t, st in reversed(novas):
+    if raiz: os.chown(t, st.st_uid, st.st_gid)
+    os.chmod(t, stat.S_IMODE(st.st_mode))
+print(n)
+LEON_FUNDE_PY
+}
+# o que o produto tira de proposito, marcadores de passagem e o produto que saiu da 2.6.8 pra 2.7.x
+LEON_FORA_DA_FUSAO=(NUCLEO-LEON.md _MOTOR-CLAUDE.md _MOTOR-CODEX.md _REGRAS-DURAS.md CAMINHOS-CANONICOS.md base-manifest.json
+  .bridge.lock .leon-admission-closed .update-pending.json .update-request.json lib/imagem.cjs)
+_n="$(funde_casa "$INSTALL_DIR" "$STAGE" "${LEON_FORA_DA_FUSAO[@]}" 2>>"$LOG")" \
+  || fatal "não consegui levar os arquivos da casa pra versão nova; runtime preservado."
+say "   arquivos da casa levados pra versao nova: $_n"
+# DEVOLUCAO (30/09): quem esta na 2.7.0 a 2.7.4 e chegou nela por atualizador (tx da mesma versao) subiu
+# sem a fusao acima; o que ficou so no backup daquela transacao volta UMA vez (depois a versao instalada
+# sai do conjunto). Casa e produto vencem, node_modules da raiz nao volta (o produto reinstala). O que o
+# dono apagou desde entao volta junto (nada se perde). Sem espaco e fatal com a casa intacta; outra falha
+# vira aviso (os arquivos seguem no backup). Logs escritos entre a fusao e a troca ficam no backup.
+# MANUTENCAO: so tirar quando nenhum cliente reportar 2.7.0 a 2.7.4 na central (versao-report no server.log).
+_T="$(grep -lsxE 'succeeded|committed' "$TX_ROOT"/*/status | sort | tail -1)" || _T=""; _T="${_T%/status}"
+_B="$(cat "$_T/backup-path" 2>/dev/null)" || _B=""
+case "$INSTALLED_RELEASE_VERSION" in 2.7.[0-4]) _V=1 ;; *) _V= ;; esac
+if [ -n "$_V" ] && [ "$(cat "$_T/new-version" 2>/dev/null || true)" = "$INSTALLED_RELEASE_VERSION" ] && [ -d "$_B" ]; then
+  _rc=0; _n="$(funde_casa "$_B" "$STAGE" "${LEON_FORA_DA_FUSAO[@]}" node_modules 2>>"$LOG")" || _rc=$?
+  [ "$_rc" != 3 ] || fatal "sem espaço pra devolver os arquivos do backup; runtime preservado."
+  if [ "$_rc" = 0 ]; then say "   devolvidos do backup $_B: $_n"; else say "   parte dos arquivos do backup nao voltou; seguem em $_B"; fi
+fi
+
 injetar_handoff_update_verdict "$STAGE/scripts/update-verdict.sh" \
   || fatal "não consegui gravar o handoff do /atualiza no vigia do stage; runtime preservado."
 
