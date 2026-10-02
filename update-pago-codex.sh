@@ -428,6 +428,7 @@ PRODUTO_ENV = {
     "LEON_MACHINE_ID": "id derivado da maquina (MAC + hostname) que a central usa na ativacao; muda so na reinstalacao, quando nao bate com a maquina onde o instalador roda",
     "LEON_LICENSE_KEY": "chave que a central devolve na ativacao; muda so quando a atual falta, esta malformada ou difere da que a central acabou de devolver",
     "TELEGRAM_BOT_TOKEN": "so na reinstalacao, quando o Telegram recusa o token atual (getMe) e o dono informou outro que o Telegram aceita",
+    "TTS_PROVIDER": "so disabled -> edgetts, e so quando o disabled foi o padrao que o produto acrescentou de 26/09 a 01/10 (bloco # LEON <data>: chaves que faltavam, data >= 2026-09-26, com VOICE_REPLY=mirror e sem EDGE_TTS_VOICE)",
 }
 
 # A LISTA EXPLICITA do config.toml: o que o produto precisa por seguranca, contra o dono.
@@ -2695,7 +2696,7 @@ PIPER_BIN=$LEON_DATA_DIR/piper-venv/bin/piper
 PIPER_MODEL=$LEON_DATA_DIR/voices/piper/pt_BR-faber-medium.onnx
 MEMVIVA_FILE=$MEMVIVA_FILE
 ASSUNTOS_FILE=$ASSUNTOS_FILE
-TTS_PROVIDER=disabled
+TTS_PROVIDER=edgetts
 VOICE_REPLY=mirror
 DRAIN_SEG=300
 PADROES
@@ -2720,6 +2721,13 @@ PADROES
     : > "$trocas"
   ) || return 1
   # TROCAS: so chave da lista do produto, e so com o valor atual provado invalido.
+  # Voz (01/10): de 26/09 a 01/10 a casa nova nascia com TTS_PROVIDER=disabled (o 2.0 mudo). Esse
+  # disabled e do produto quando mora no bloco "# LEON <data>: chaves que faltavam" de 26/09 em diante,
+  # com VOICE_REPLY=mirror e sem EDGE_TTS_VOICE; volta pra Edge. Qualquer outro disabled e do dono.
+  if awk '/^# LEON [0-9-]+: chaves que faltavam/{d=substr($3,1,10);next} /^TTS_PROVIDER=/{t=$0;td=d} /^VOICE_REPLY=/{v=$0} /^[[:space:]]*EDGE_TTS_VOICE[[:space:]]*=/{e=1}
+    END{exit !(t=="TTS_PROVIDER=disabled" && td>="2026-09-26" && v=="VOICE_REPLY=mirror" && !e)}' "$env_file"; then
+    printf 'TTS_PROVIDER=edgetts\n' >> "$trocas"
+  fi
   if [ "$LEON_ENGINE_CASA" = codex ]; then
     atual="$(env_get_from "$env_file" CODEX_BIN)"
     if [ "$CODEX_CLI_SUBIU" = 1 ]; then
@@ -5116,15 +5124,6 @@ from faster_whisper import WhisperModel
 WhisperModel("small", device="cpu", compute_type="int8")
 PYMODEL
 fi
-# 3) BANCO POSTGRES (mesma estrutura do dono; espelho, nunca dependencia):
-[ -x "$INSTALL_DIR/scripts/garante-banco.sh" ] && bash "$INSTALL_DIR/scripts/garante-banco.sh" 2>/dev/null | sed "s/^/  /" || true
-[ -f "$INSTALL_DIR/workers/importa-estado-pro-banco.cjs" ] && _cron_add "50 3 * * * /usr/bin/node $INSTALL_DIR/workers/importa-estado-pro-banco.cjs >/dev/null 2>&1" "$INSTALL_DIR/workers/importa-estado-pro-banco.cjs"
-# modulo pg pro importador (best-effort, uma vez)
-# node resolve modulo subindo da pasta do SCRIPT (workers/): pg mora na RAIZ da casa (bancada pegou)
-if [ ! -d "$INSTALL_DIR/node_modules/pg" ]; then
-  ( cd "$INSTALL_DIR" && timeout 120 npm install -q --no-save pg >/dev/null 2>&1 ) || true
-fi
-
 # 4) REPORT DE VERSAO: NAO reportamos a versao nova aqui (fix report-falso). Reportar
 # antes do restart+prova de saude fazia a central registrar sucesso mesmo quando o
 # finalizador revertia — painel/monitor mentiam. Agora quem reporta e o finalizador,

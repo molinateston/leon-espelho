@@ -185,19 +185,49 @@ echo "Agora eu instalo. Pode demorar alguns minutos e vai passar muito texto."
 echo "Se aparecer um link com um código, abra o link, entre na sua conta e digite o código."
 echo ""
 
-INSTALADOR="$(mktemp /tmp/leon-install.XXXXXX.sh)"
-trap 'rm -f -- "$INSTALADOR"' EXIT
-# GitHub primeiro, central de reserva. O instalador baixado confere, ele mesmo, a assinatura de
-# tudo o que baixa depois (manifesto pela chave pinada, pacotes pelo sha do manifesto).
-ORIGEM_INST=github
-if ! curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 120 "$ESPELHO/install-leon.sh" -o "$INSTALADOR" </dev/null \
-   || ! bash -n "$INSTALADOR" 2>/dev/null; then
+# LACRE DO INSTALADOR (01/10): o install-leon.sh só roda se o sha256 dele bater com o
+# manifesto-instalador.json ASSINADO pela mesma chave Ed25519 de produção que assina o
+# release-manifest (a que o install-leon.sh pina; conferida pela impressão antes do uso).
+# GitHub primeiro, central de reserva; cada origem passa pela conferência inteira e, se nenhuma
+# passar (adulterado, assinatura errada, arquivo ausente ou vazio, rede), nada roda.
+# Sem chave por variável de ambiente, de propósito: um comando colado de fonte falsa não traz a
+# própria âncora. A prova troca a chave numa CÓPIA deste arquivo (test/prova-lacre-instalador.cjs).
+CHAVE_INSTALADOR='-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAzLQi1On9pdcj/g7Z8WxHxPeTijp0t3yhGnfoZfDzpXI=
+-----END PUBLIC KEY-----'
+FP_INSTALADOR='eb70521f5e4dd9bb1cd11e6ceb0b2bddd65596558322908a2d04fd3dec5cbe08'
+command -v openssl >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1 \
+  || morre "faltam o openssl ou o sha256sum nesta VPS; sem eles não consigo conferir o instalador. Rode: apt-get install -y openssl coreutils"
+LACRE="$(mktemp -d /tmp/leon-install.XXXXXX)" || morre "não consegui criar a pasta temporária em /tmp."
+trap 'rm -rf -- "$LACRE"' EXIT
+INSTALADOR="$LACRE/install-leon.sh"
+printf '%s\n' "$CHAVE_INSTALADOR" > "$LACRE/chave.pem"
+[ "$(sha256sum < "$LACRE/chave.pem" | cut -d' ' -f1)" = "$FP_INSTALADOR" ] \
+  || morre "a chave de conferência deste comando não bate com a impressão. Baixe o comando de novo da página oficial."
+baixa() { curl -fsSL --max-filesize "$3" --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 120 "$1" -o "$2" </dev/null 2>/dev/null && [ -s "$2" ]; }
+lacre_origem() {  # <base-url>: 0 só com assinatura e sha conferidos; senão MOTIVO diz o que falhou
+  local b="$1" esperado
+  rm -f -- "$LACRE/m.json" "$LACRE/m.sig" "$INSTALADOR"
+  baixa "$b/manifesto-instalador.json" "$LACRE/m.json" 65536 || { MOTIVO="manifesto do instalador ausente ou vazio"; return 1; }
+  baixa "$b/manifesto-instalador.sig" "$LACRE/m.sig" 64 || { MOTIVO="assinatura do manifesto ausente ou vazia"; return 1; }
+  openssl pkeyutl -verify -rawin -pubin -inkey "$LACRE/chave.pem" -in "$LACRE/m.json" -sigfile "$LACRE/m.sig" >/dev/null 2>&1 \
+    || { MOTIVO="a assinatura do manifesto do instalador não confere"; return 1; }
+  esperado="$(sed -n 's/^[[:space:]]*"install-leon\.sh"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{64\}\)".*/\1/p' "$LACRE/m.json" | head -1)"
+  [ -n "$esperado" ] || { MOTIVO="o manifesto assinado não cita o install-leon.sh"; return 1; }
+  baixa "$b/install-leon.sh" "$INSTALADOR" 8388608 || { MOTIVO="instalador ausente ou vazio"; return 1; }
+  [ "$(sha256sum < "$INSTALADOR" | cut -d' ' -f1)" = "$esperado" ] \
+    || { MOTIVO="o instalador é diferente do que foi assinado (adulterado ou publicação pela metade)"; return 1; }
+}
+MOTIVO=""
+if lacre_origem "$ESPELHO"; then ORIGEM_INST=github
+else
+  MOTIVO_GH="$MOTIVO"
+  lacre_origem "$CENTRAL" || morre "o instalador NÃO passou na conferência de segurança (GitHub: $MOTIVO_GH; central: $MOTIVO). Por segurança não rodei nada. Espere 10 minutos e rode o mesmo comando de novo."
   ORIGEM_INST=central
-  curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 120 "$CENTRAL/install-leon.sh" -o "$INSTALADOR" </dev/null \
-    || morre "não consegui baixar o instalador nem do GitHub nem da central (a VPS está sem internet?)."
+  amarelo "  aviso: o GitHub não passou na conferência ($MOTIVO_GH); usei a central, conferida pela assinatura."
 fi
 bash -n "$INSTALADOR" || morre "o instalador baixou corrompido. Rode o mesmo comando de novo."
-echo "  instalador baixado (origem: $ORIGEM_INST)"
+echo "  instalador baixado e conferido pela assinatura (origem: $ORIGEM_INST)"
 
 export LEON_ENGINE="$ENGINE" EMAIL="$EMAIL" NOME="$NOME" GENDER="$GENDER" BOT_TOKEN="$TOKEN"
 export LEON_ESPELHO="$ESPELHO"

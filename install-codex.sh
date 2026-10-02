@@ -141,6 +141,7 @@ PRODUTO_ENV = {
     "LEON_MACHINE_ID": "id derivado da maquina (MAC + hostname) que a central usa na ativacao; muda so na reinstalacao, quando nao bate com a maquina onde o instalador roda",
     "LEON_LICENSE_KEY": "chave que a central devolve na ativacao; muda so quando a atual falta, esta malformada ou difere da que a central acabou de devolver",
     "TELEGRAM_BOT_TOKEN": "so na reinstalacao, quando o Telegram recusa o token atual (getMe) e o dono informou outro que o Telegram aceita",
+    "TTS_PROVIDER": "so disabled -> edgetts, e so quando o disabled foi o padrao que o produto acrescentou de 26/09 a 01/10 (bloco # LEON <data>: chaves que faltavam, data >= 2026-09-26, com VOICE_REPLY=mirror e sem EDGE_TTS_VOICE)",
 }
 
 # A LISTA EXPLICITA do config.toml: o que o produto precisa por seguranca, contra o dono.
