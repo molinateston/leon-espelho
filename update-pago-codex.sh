@@ -2183,7 +2183,7 @@ PY
 # O CLI velho fica intacto: qualquer falha deixa a casa no binario de antes. Best-effort de
 # verdade: nenhum caminho daqui da fatal. O bridge tem o mesmo passo em segundo plano
 # (atualizaClaudeCliEmSegundoPlano), disparado quando o CLI recusa o modelo.
-LEON_CLAUDE_CLI_MINIMA="${LEON_CLAUDE_CLI_MINIMA:-2.1.280}"
+LEON_CLAUDE_CLI_MINIMA="${LEON_CLAUDE_CLI_MINIMA:-2.1.287}"   # 02/10 (dono): a minima acompanha a versao mais nova
 CLAUDE_CLI_PACOTE="@anthropic-ai/claude-code@latest"
 
 # `|| true` obrigatorio: o script roda com set -Eeuo pipefail. Binario quebrado (node ausente no
@@ -4825,6 +4825,12 @@ if { [ "$LEON_ENGINE_CASA" = claude ] || [ -n "$CLAUDE_BIN_ATUAL" ]; } \
     fi
   fi
 fi
+
+# 02/10 (dono): voz e transcricao sempre na versao mais nova (best-effort; so mexe no venv que e do usuario que roda, nunca derruba a atualizacao)
+for _v in whisper-venv:faster-whisper edgetts-venv:edge-tts piper-venv:piper-tts; do
+  _pip="$LEON_DATA_DIR/${_v%%:*}/bin/pip"
+  [ -x "$_pip" ] && [ -O "$_pip" ] && { timeout 240 "$_pip" install --quiet --upgrade "${_v##*:}" >/dev/null 2>&1 || true; }
+done
 
 ENV_RECUSA=""
 rewrite_runtime_env "$STAGE/.env" \

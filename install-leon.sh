@@ -2835,6 +2835,7 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
       fi
     fi
   fi
+  "${APT_INSTALL[@]}" --only-upgrade ffmpeg python3-pip >/dev/null 2>&1 || true   # 02/10 (dono): programa da casa sempre na versao mais nova
   # CRON ROBUSTO (fix bug-de-nascenca 01/09): o `|| true` cego deixava a casa nascer
   # com o cron MORTO sem ninguem saber — e o /atualiza (que roda pelo cron) travava
   # eterno. Agora liga de verdade, desmascara, e CONFERE. O motor reserva (leon-vigia.timer,
@@ -2902,8 +2903,8 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
       local v; v="$(claude_cli_versao)"
       [ -n "$v" ] && [ "$(printf '%s\n%s\n' "$LEON_CLAUDE_CLI_MINIMA" "$v" | sort -V | head -n 1)" = "$LEON_CLAUDE_CLI_MINIMA" ]
     }
-    if ! claude_cli_minima_ok; then
-      echo ">> o Claude Code desta VPS ($(claude_cli_versao || true)) esta abaixo do minimo $LEON_CLAUDE_CLI_MINIMA; atualizando (npm do sistema)..."
+    if true; then   # 02/10 (dono): sempre a versao mais nova, nao so a minima
+      echo ">> atualizando o Claude Code desta VPS ($(claude_cli_versao || true)) pra versao mais nova (npm do sistema)..."
       PATH="$SYS_PATH" /usr/bin/node /usr/bin/npm install -g --prefix=/usr @anthropic-ai/claude-code@latest \
         >/dev/null 2>/tmp/npm-claude.err || true
       if claude_cli_minima_ok; then
@@ -3019,6 +3020,7 @@ if [ ! -x "$LEON_DADOS"/piper-venv/bin/piper ]; then
   python3 -m venv "$LEON_DADOS"/piper-venv
   "$LEON_DADOS"/piper-venv/bin/pip install --quiet piper-tts >/dev/null
 fi
+"$LEON_DADOS"/piper-venv/bin/pip install --quiet --upgrade piper-tts >/dev/null 2>&1 || true   # 02/10 (dono): sempre a versao mais nova
 for f in pt_BR-faber-medium.onnx pt_BR-faber-medium.onnx.json; do
   if [ ! -s "$LEON_DADOS"/voices/piper/$f ]; then
     curl -sfL -o "$LEON_DADOS"/voices/piper/$f.part "https://huggingface.co/rhasspy/piper-voices/resolve/main/pt/pt_BR/faber/medium/$f"
@@ -3035,6 +3037,7 @@ if [ ! -x "$LEON_DADOS"/edgetts-venv/bin/edge-tts ]; then
   python3 -m venv "$LEON_DADOS"/edgetts-venv
   "$LEON_DADOS"/edgetts-venv/bin/pip install --quiet edge-tts >/dev/null
 fi
+"$LEON_DADOS"/edgetts-venv/bin/pip install --quiet --upgrade edge-tts >/dev/null 2>&1 || true   # 02/10 (dono): sempre a versao mais nova
 EDGE_SETUP
 
   echo ">> instalando transcricao de audio local (faster-whisper)..."
@@ -3046,6 +3049,7 @@ if [ ! -x "$LEON_DADOS"/whisper-venv/bin/python3 ] || ! "$LEON_DADOS"/whisper-ve
   "$LEON_DADOS"/whisper-venv/bin/pip install --quiet --upgrade pip >/dev/null
   "$LEON_DADOS"/whisper-venv/bin/pip install --quiet faster-whisper >/dev/null
 fi
+"$LEON_DADOS"/whisper-venv/bin/pip install --quiet --upgrade faster-whisper >/dev/null 2>&1 || true   # 02/10 (dono): a transcricao nao pode ficar desatualizada
 # 25/08 (lei do dono: "transcricao TEM que ser nativa"): o modelo baixa AGORA, na
 # instalacao — nao no primeiro audio do cliente. Sem isto, o primeiro audio dele
 # virava "roda /audio e espera uns minutos": vergonha na frente de cliente novo.
