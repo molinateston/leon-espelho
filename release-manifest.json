@@ -8,10 +8,10 @@
       "url": "/download-codex"
     },
     "bundle": {
-      "bytes": 402885,
+      "bytes": 403110,
       "file": "leon-codex-appserver-v2.tar.gz",
       "licensed": false,
-      "sha256": "36d44b8b98e8e83a5434fea6fe697d3ee0f60fcca2cc65e737b927a4dae93fec",
+      "sha256": "d177d12b873753c16e85abb330939ea681c43a3e30e8316659a5142572355281",
       "url": "/leon-codex-appserver-v2.tar.gz"
     },
     "skills": {
@@ -36,5 +36,5 @@
   "minVersion": "2.0.0",
   "nodeVersion": "22.22.0",
   "schema": 2,
-  "version": "2.7.9"
+  "version": "2.7.10"
 }
