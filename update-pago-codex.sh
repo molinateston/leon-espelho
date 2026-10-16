@@ -664,6 +664,13 @@ def env_acrescenta(env, padroes_arq, trocas_arq, saida, relatorio, data_dir=""):
             if any(k in ("CODEX_BIN", "LEON_CODEX_CLI_VERSION") for k, _ in trocas):
                 rel.append("binario-do-dono CODEX_BIN")
             trocas = [(k, v) for k, v in trocas if k not in ("CODEX_BIN", "LEON_CODEX_CLI_VERSION")]
+    # 05/10: valor VAZIO nao e escolha do dono. CODEX_BIN= vazio (ou so aspas e espaco) deixava o LEON chamar "codex" solto
+    # (spawn codex ENOENT). O produto troca o vazio pelo que ele mesmo instalou, so quando os padroes trazem o valor.
+    for k in ("CODEX_BIN", "LEON_CODEX_CLI_VERSION"):
+        if k in ativas and not valor_do_bridge(RE_KV.match(linhas[ativas[k]]).group(2)) and not any(a == k for a, _ in trocas):
+            novo = next((v for a, v in padroes if a == k and v), None)
+            if novo:
+                trocas.append((k, novo))
     novas = []
     feitas = set()
     for k, v in trocas:
@@ -2106,6 +2113,8 @@ subir_codex_cli_nativo() {
   rm -rf -- "$staging" 2>/dev/null || true
   mkdir -p -- "$staging" 2>/dev/null || return 1
   chmod 0700 "$staging" 2>/dev/null || true
+  # 05/10: o motivo real da falha fica em <dados>/codex-cli/.upgrade-ultimo.log (antes ia pra /dev/null e o aviso dizia "deve ter sido rede")
+  [ -x "$bin_atual" ] || { printf 'o Codex desta casa nao esta em %s\n' "$bin_atual" > "$data_dir/codex-cli/.upgrade-ultimo.log" 2>/dev/null; rm -rf -- "$staging" 2>/dev/null || true; return 1; }
   # Registra pro cleanup_main: morte por sinal no meio do npm nao deixa lixo no disco.
   CODEX_CLI_STAGING="$staging"
 
@@ -2114,7 +2123,7 @@ subir_codex_cli_nativo() {
   if ! env npm_config_prefix="$staging" \
         npm_config_audit=false npm_config_fund=false npm_config_update_notifier=false \
         PATH="$(dirname "$node_bin"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-        timeout 300 "$bin_atual" update >/dev/null 2>&1; then
+        timeout 300 "$bin_atual" update >"$data_dir/codex-cli/.upgrade-ultimo.log" 2>&1; then
     rm -rf -- "$staging" 2>/dev/null || true
     return 1
   fi
@@ -2716,6 +2725,9 @@ CLAUDE_CONFIG_DIR=$(leon_preserva home-do-motor "$env_file" claude "$LEON_DATA_D
 CODEX_MODEL=$codex_model
 CODEX_REASONING_EFFORT=high
 PADROES
+      # 05/10: casa Claude com o Codex do produto instalado: sem o CODEX_BIN no .env o 2.0 chama "codex" solto (spawn codex ENOENT)
+      _cli_prod=""; for _c in $(ls -d "$LEON_DATA_DIR"/codex-cli/releases/*/bin/codex 2>/dev/null | sort -V); do [ -x "$_c" ] && _cli_prod="$_c"; done
+      [ -z "$_cli_prod" ] || printf 'CODEX_BIN=%s\n' "$_cli_prod" >> "$pad"
     fi
     [ -z "${CLAUDE_BIN_NOVO:-}" ] || printf 'CLAUDE_BIN=%s\n' "$CLAUDE_BIN_NOVO" >> "$pad"
     : > "$trocas"
@@ -2984,6 +2996,16 @@ funde_config_do_dono() {  # funde_config_do_dono <config atual> <molde> <candida
 tx_read() {
   local tx="$1" name="$2"
   cat "$tx/$name"
+}
+
+# 15/10: o finalizador do cron roda este mesmo script em --finalize, sem ambiente, e nasce com NODE_BIN vazio. Com o NODE_BIN
+# vazio todo "$NODE_BIN" --check do health_smoke falhava e uma versao boa era desfeita (casa da Leticia, 2.7.10). O corpo grava o
+# node do runtime em node-bin e o finalizador le de volta; sem o arquivo ou com caminho ruim vale /usr/bin/node.
+node_da_tx() {
+  local n; n="$(tx_read "$1" node-bin 2>/dev/null || true)"
+  case "$n" in /*) [ -x "$n" ] || n="" ;; *) n="" ;; esac
+  if [ -z "$n" ] && [ -x /usr/bin/node ]; then n=/usr/bin/node; fi
+  printf '%s' "$n"
 }
 
 remove_finalize_cron() {
@@ -3669,6 +3691,7 @@ finalize_transaction() {
   live="$(tx_read "$tx" live-path)"
   thread="$(tx_read "$tx" thread-id)"
   chat="$(tx_read "$tx" chat-id)"
+  NODE_BIN="$(node_da_tx "$tx")"
   case "$(cat "$tx/status" 2>/dev/null || true)" in
     succeeded|rolled-back)
       remove_finalize_cron "$marker"
@@ -3981,9 +4004,8 @@ LEON_CODEX_CLI_VERSION="$(env_get_from "$ENV_READ_SAFE" LEON_CODEX_CLI_VERSION)"
 # "Rode novamente o instalador Codex". Como o instalador agenda a atualizacao automatica de
 # hora em hora no minuto 13, o cliente levava esse erro na primeira hora depois de instalar,
 # sem ter digitado nada. O portao sobe para ca e o caminho do Node passa a depender do motor.
-LEON_ENGINE_CASA="$(env_get_from "$ENV_READ_SAFE" ENGINE_DEFAULT)"
-[ -n "$LEON_ENGINE_CASA" ] || LEON_ENGINE_CASA="$(env_get_from "$ENV_READ_SAFE" ENGINE)"
-case "$LEON_ENGINE_CASA" in claude) ;; *) LEON_ENGINE_CASA=codex ;; esac
+LEON_ENGINE_CASA="$(env_get_from "$ENV_READ_SAFE" ENGINE)"
+case "$LEON_ENGINE_CASA" in claude|codex) ;; *) LEON_ENGINE_CASA=claude ;; esac   # 13/10: segue o runtime (leon2/lib/config.cjs: ENGINE || "claude", ENGINE_DEFAULT nao entra); o Node dedicado nao decide motor
 if [ "$LEON_ENGINE_CASA" = claude ]; then
   EXPECTED_NODE_BIN=/usr/bin/node
 else
@@ -4035,11 +4057,9 @@ validate_runtime_roots 0 || fatal "os caminhos de dados são inseguros ou passam
 # QUAL MOTOR ESTA CASA USA. O runtime, a base e a unit sao os MESMOS nos dois motores,
 # entao tudo acima vale igual. O que segue e do CLI do Codex: versao pinada e config.toml.
 # Numa casa que roda o outro motor esses arquivos nao existem, e exigi-los travava o
-# /atualiza dela sem motivo. Valor ausente ou desconhecido cai no motor historico, que e
-# o que toda casa instalada ate aqui usa.
-LEON_ENGINE_CASA="$(env_get_from "$ENV_READ_SAFE" ENGINE_DEFAULT)"
-[ -n "$LEON_ENGINE_CASA" ] || LEON_ENGINE_CASA="$(env_get_from "$ENV_READ_SAFE" ENGINE)"
-case "$LEON_ENGINE_CASA" in claude) ;; *) LEON_ENGINE_CASA=codex ;; esac
+# /atualiza dela sem motivo.
+LEON_ENGINE_CASA="$(env_get_from "$ENV_READ_SAFE" ENGINE)"
+case "$LEON_ENGINE_CASA" in claude|codex) ;; *) LEON_ENGINE_CASA=claude ;; esac   # 13/10: segue o runtime (leon2/lib/config.cjs: ENGINE || "claude", ENGINE_DEFAULT nao entra); o Node dedicado nao decide motor
 if [ "$LEON_ENGINE_CASA" = codex ]; then
   if ! printf %s "$LEON_CODEX_CLI_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([_-][A-Za-z0-9.-]+)?$'; then
     fatal "a versão esperada do Codex CLI é inválida."
@@ -4625,6 +4645,7 @@ fi
 bash -n "$STAGE/update-pago.sh" || fatal "o atualizador preparado falhou no último teste de sintaxe."
 BRIDGE_SHA="$(sha256sum "$STAGE/bridge.cjs" | awk '{print $1}')"
 printf '%s\n' "$BRIDGE_SHA" > "$TX_DIR/bridge-sha256"
+printf '%s\n' "$NODE_BIN" > "$TX_DIR/node-bin"
 # 17/09: familia do runtime ENTRANTE. Aqui e o primeiro ponto seguro: o stage ja
 # passou por node --check e pelo BRIDGE_SHA acima (codigo assinado, extraido e
 # conferido) e nada da casa viva foi mutado ainda. O sinal e o codigo, nao a
@@ -4803,6 +4824,7 @@ if [ "$CODEX_CLI_ABAIXO_DA_MINIMA" = "1" ] && [ "$TEST_MODE" != "1" -o "${LEON_T
     say "   motor Codex agora na $LEON_CODEX_CLI_VERSION."
   else
     say "   o motor Codex não subiu agora; sigo com a $LEON_CODEX_CLI_VERSION e tento de novo no próximo /atualiza."
+    say "   motivo: $(tail -n 3 "$LEON_DATA_DIR/codex-cli/.upgrade-ultimo.log" 2>/dev/null | tr '\n' ' ' | cut -c1-240)"
   fi
 fi
 # ---- MOTOR CLAUDE: o irmao do passo de cima (23/09) --------------------------

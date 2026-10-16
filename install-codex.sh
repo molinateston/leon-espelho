@@ -377,6 +377,13 @@ def env_acrescenta(env, padroes_arq, trocas_arq, saida, relatorio, data_dir=""):
             if any(k in ("CODEX_BIN", "LEON_CODEX_CLI_VERSION") for k, _ in trocas):
                 rel.append("binario-do-dono CODEX_BIN")
             trocas = [(k, v) for k, v in trocas if k not in ("CODEX_BIN", "LEON_CODEX_CLI_VERSION")]
+    # 05/10: valor VAZIO nao e escolha do dono. CODEX_BIN= vazio (ou so aspas e espaco) deixava o LEON chamar "codex" solto
+    # (spawn codex ENOENT). O produto troca o vazio pelo que ele mesmo instalou, so quando os padroes trazem o valor.
+    for k in ("CODEX_BIN", "LEON_CODEX_CLI_VERSION"):
+        if k in ativas and not valor_do_bridge(RE_KV.match(linhas[ativas[k]]).group(2)) and not any(a == k for a, _ in trocas):
+            novo = next((v for a, v in padroes if a == k and v), None)
+            if novo:
+                trocas.append((k, novo))
     novas = []
     feitas = set()
     for k, v in trocas:
