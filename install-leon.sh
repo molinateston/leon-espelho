@@ -2787,11 +2787,11 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
   # apt 100% mudo: sem a tela roxa do needrestart (travou o cliente leigo em
   # 22/08) e sem pergunta de conffile (quem ja tem config local fica com a dela).
   export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
-  APT_INSTALL=(apt-get install -y -qq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+  APT_INSTALL=(apt-get install -y -qq -o DPkg::Lock::Timeout=300 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)   # 19/10: VPS nova segura o dpkg nos primeiros minutos (cloud-init, unattended-upgrades)
 
   # Um repositorio alheio quebrado nao pode derrubar a instalacao inteira: o
   # update avisa e segue com o indice que existe; o install e que decide.
-  apt-get update -qq >/dev/null 2>/tmp/apt-update.err \
+  apt-get update -qq -o DPkg::Lock::Timeout=300 >/dev/null 2>/tmp/apt-update.err \
     || echo "   (aviso) apt-get update reclamou de algum repositorio; sigo com o indice que existe."
   # cron: o agente instala sozinho as rotinas de backup, saude, a rede de
   # seguranca do update e o vigia do /atualiza. Sem cron, nada disso existe.
@@ -2806,7 +2806,7 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
   )
   if ! "${APT_INSTALL[@]}" "${PACOTES_BASE[@]}" >/dev/null 2>/tmp/apt-base.err; then
     echo "   (aviso) pacotes nao vieram na primeira tentativa; atualizo o indice e tento de novo..."
-    apt-get update -qq >/dev/null 2>>/tmp/apt-base.err || true
+    apt-get update -qq -o DPkg::Lock::Timeout=300 >/dev/null 2>>/tmp/apt-base.err || true
     if ! "${APT_INSTALL[@]}" --fix-missing "${PACOTES_BASE[@]}" >/dev/null 2>>/tmp/apt-base.err; then
       # TERCEIRA TENTATIVA (clientes 19/09, Debian 11): o apt recusa renovar o indice de um
       # Release vencido ("Valid-Until" passou) e continua pedindo .deb que o espelho ja trocou
@@ -2880,6 +2880,10 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
     exit 1
   fi
   echo "   node do sistema $(/usr/bin/node -v) em /usr/bin/node"
+  # 19/10 (Ubuntu 26.04 LTS, caso real de cliente): o Node do repositorio da Ubuntu vem SEM npm e o NodeSource
+  # ainda nao serve o 26.04; o passo do Claude Code abaixo roda /usr/bin/npm e abortava com "Cannot find module".
+  [ -x /usr/bin/npm ] || "${APT_INSTALL[@]}" npm >/dev/null 2>/tmp/apt-npm.err || true
+  [ -x /usr/bin/npm ] || { echo "ERRO: o npm nao ficou em /usr/bin/npm nesta VPS." >&2; [ -s /tmp/apt-npm.err ] && echo "detalhe apt: $(tail -n 3 /tmp/apt-npm.err)" >&2; echo "abortando. suporte: https://wa.me/5511988890934" >&2; exit 1; }
 
   # CLI do motor. Codex: nada global; o CLI pinado nasce no prefixo dedicado do
   # usuario leon, na fase user (A4). Claude: Claude Code pelo npm DO SISTEMA
@@ -2896,7 +2900,7 @@ if [ "$(id -u)" = "0" ] && [ "$MOCK_MODE" != "1" ]; then
     fi
     if ! claude_cli_ok; then
       echo "ERRO: Claude CLI nao instalou nesta VPS." >&2
-      [ -s /tmp/npm-claude.err ] && echo "detalhe npm: $(tail -n 3 /tmp/npm-claude.err)" >&2
+      [ -s /tmp/npm-claude.err ] && echo "detalhe npm: $(grep -v '^[[:space:]]*$' /tmp/npm-claude.err | head -n 6)" >&2
       echo "abortando. suporte: https://wa.me/5511988890934" >&2
       exit 1
     fi

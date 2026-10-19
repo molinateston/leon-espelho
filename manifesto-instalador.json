@@ -1,10 +1,10 @@
 {
-  "gerado_em": "2026-10-15T18:31:47Z",
-  "commit": "0e32d51224d1523d8c0e5663a865b2e4e8e7141f",
+  "gerado_em": "2026-10-19T17:08:08Z",
+  "commit": "f6889d6ac8b61428aeabd685637e9c7dce20e312",
   "publico": "/home/cloud/licenca-central/public",
   "scripts": {
     "install-codex.sh": "4d1c90ef13ab8bd817d03934ff1d47ee6bec5f1aa09ea0a64e68956ea83e1253",
-    "install-leon.sh": "77919220813ba944e4c56fdf842f862664f5d91c1671fc09c770c7f80ad7ecf9",
+    "install-leon.sh": "eb368a706b464fd107fd9a38a577d257eac8c4d6dbe218f4c431389d33f2ef30",
     "update-pago-codex.sh": "56d97a65a7f457749838584501833085aead6904a33950753219904d8a4e61e7",
     "cura-atualizador.sh": "b190ee2cd1251c27735db056a541689ed1b08789a83233bd3f7da3cda368266d",
     "leon.sh": "b92cd4e7dd1ab6624f190d55f7972df358ea75539abe12fbfe2707d394a790f8"
