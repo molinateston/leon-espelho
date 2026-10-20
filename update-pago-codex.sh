@@ -2054,20 +2054,22 @@ for base,_,_ in sorted(os.walk(root),key=lambda x:x[0].count(os.sep),reverse=Tru
 PY
 }
 
+# Reprova (sai 1) e diz no stderr, numa linha, o primeiro item fora do padrao: o health_smoke manda isso no motivo.
 installed_skills_digest() {
   "$PYTHON_BIN" - "$1" <<'PY'
 import hashlib,os,stat,sys
 root=os.path.abspath(sys.argv[1]); lines=[]
-if not os.path.isdir(root) or os.path.islink(root): raise SystemExit(1)
+def nao(m): sys.stderr.write(m+"\n"); raise SystemExit(1)
+if not os.path.isdir(root) or os.path.islink(root): nao("catalogo ausente ou e link")
 for base,dirs,names in os.walk(root,topdown=True,followlinks=False):
  for d in dirs:
-  st=os.lstat(os.path.join(base,d))
-  if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode) or stat.S_IMODE(st.st_mode)!=0o500: raise SystemExit(1)
+  st=os.lstat(os.path.join(base,d)); rel=os.path.relpath(os.path.join(base,d),root)
+  if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode) or stat.S_IMODE(st.st_mode)!=0o500: nao(f"pasta fora do padrao (modo {stat.S_IMODE(st.st_mode):04o} ou link, quer 0500): {rel}")
  for name in names:
   full=os.path.join(base,name); rel=os.path.relpath(full,root).replace(os.sep,"/"); st=os.lstat(full)
-  if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1 or stat.S_IMODE(st.st_mode) not in (0o400,0o500): raise SystemExit(1)
+  if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1 or stat.S_IMODE(st.st_mode) not in (0o400,0o500): nao(f"arquivo fora do padrao (modo {stat.S_IMODE(st.st_mode):04o}, links {st.st_nlink}, quer 0400 ou 0500 e 1 link): {rel}")
   raw=open(full,"rb").read()
-  if b"@@LEON_" in raw: raise SystemExit(1)
+  if b"@@LEON_" in raw: nao(f"marcador @@LEON_ sem trocar: {rel}")
   lines.append((rel.encode(),f"{hashlib.sha256(raw).hexdigest()}\t{len(raw)}\t{stat.S_IMODE(st.st_mode):04o}\t{rel}\n".encode()))
 print(hashlib.sha256(b"".join(line for _,line in sorted(lines))).hexdigest())
 PY
@@ -2537,12 +2539,15 @@ bridge_e_leon2() {  # bridge_e_leon2 <bridge.cjs>
     && [ -s "$(dirname "$1")/leon2/leon.cjs" ]
 }
 # node --check do 2.0 inteiro (porta, leon.cjs e as libs) numa casa ou stage.
+#   Reprovou: LEON2_SINTAXE_FALHOU diz qual arquivo e a saida do node (o health_smoke grava isso no motivo):
+#   1 = erro de sintaxe, 127 = node ausente, 137 = morto pelo kernel (memoria).
 leon2_sintaxe_ok() {  # leon2_sintaxe_ok <runtime>
   local f
-  "$NODE_BIN" --check "$1/leon2/leon.cjs" >/dev/null 2>&1 || return 1
+  LEON2_SINTAXE_FALHOU=""
+  "$NODE_BIN" --check "$1/leon2/leon.cjs" >/dev/null 2>&1 || { LEON2_SINTAXE_FALHOU="leon2/leon.cjs (saida $?)"; return 1; }
   for f in "$1"/leon2/lib/*.cjs "$1"/leon2/bin/*; do
-    [ -f "$f" ] || return 1
-    "$NODE_BIN" --check "$f" >/dev/null 2>&1 || return 1
+    [ -f "$f" ] || { LEON2_SINTAXE_FALHOU="${f#"$1"/} (nao e arquivo)"; return 1; }
+    "$NODE_BIN" --check "$f" >/dev/null 2>&1 || { LEON2_SINTAXE_FALHOU="${f#"$1"/} (saida $?)"; return 1; }
   done
 }
 
@@ -3358,25 +3363,34 @@ health_smoke() {
   skills_path="$(tx_read "$tx" skills-path)"
   attempts="${LEON_HEALTH_ATTEMPTS:-15}"
   stable_sleep="${LEON_HEALTH_STABLE_SLEEP:-3}"
-  [ "${LEON_TEST_FAIL_AT:-}" != "health" ] || return 1
-  [ -f "$live/bridge.cjs" ] || return 1
-  if bridge_e_leon2 "$live/bridge.cjs"; then leon2_sintaxe_ok "$live" || return 1; fi
-  [ -s "$live/appserver/adapter.cjs" ] || return 1
-  [ -s "$live/lib/onboarding.js" ] || return 1
-  [ -s "$live/lib-motores/codex-appserver.cjs" ] || return 1
-  [ -s "$live/lib-motores/claude.cjs" ] || return 1
-  [ -s "$live/lib-motores/index.cjs" ] || return 1
-  [ -s "$live/smoke/appserver-smoke.cjs" ] || return 1
-  [ -s "$live/workers/piper.js" ] || return 1
-  [ "$(sha256sum "$live/bridge.cjs" | awk '{print $1}')" = "$expected" ] || return 1
-  [ "$(installed_skills_digest "$skills_path")" = "$expected_skills" ] || return 1
-  "$NODE_BIN" --check "$live/bridge.cjs" >/dev/null 2>&1 || return 1
-  "$NODE_BIN" --check "$live/appserver/adapter.cjs" >/dev/null 2>&1 || return 1
-  "$NODE_BIN" --check "$live/lib/onboarding.js" >/dev/null 2>&1 || return 1
-  "$NODE_BIN" --check "$live/lib-motores/codex-appserver.cjs" >/dev/null 2>&1 || return 1
-  "$NODE_BIN" --check "$live/lib-motores/claude.cjs" >/dev/null 2>&1 || return 1
-  "$NODE_BIN" --check "$live/lib-motores/index.cjs" >/dev/null 2>&1 || return 1
-  "$NODE_BIN" --check "$live/workers/piper.js" >/dev/null 2>&1 || return 1
+  # 16/10 (casa da Leticia, 2 reprovacoes com "motivo nao registrado"): toda saida daqui
+  # em diante grava o motivo numa linha. Mesmas provas, mesma ordem; so o registro e novo.
+  local f got
+  [ "${LEON_TEST_FAIL_AT:-}" != "health" ] || { health_motivo "$tx" "falha injetada pelo teste (LEON_TEST_FAIL_AT=health)"; return 1; }
+  [ -f "$live/bridge.cjs" ] || { health_motivo "$tx" "arquivo obrigatorio ausente no runtime novo: bridge.cjs"; return 1; }
+  if bridge_e_leon2 "$live/bridge.cjs"; then
+    leon2_sintaxe_ok "$live" || { health_motivo "$tx" "node --check reprovou ${LEON2_SINTAXE_FALHOU:-o leon2} (node: ${NODE_BIN:-vazio})"; return 1; }
+  fi
+  for f in appserver/adapter.cjs lib/onboarding.js lib-motores/codex-appserver.cjs lib-motores/claude.cjs \
+           lib-motores/index.cjs smoke/appserver-smoke.cjs workers/piper.js; do
+    [ -s "$live/$f" ] || { health_motivo "$tx" "arquivo obrigatorio ausente ou vazio no runtime novo: $f"; return 1; }
+  done
+  got="$(sha256sum "$live/bridge.cjs" | awk '{print $1}')"
+  [ "$got" = "$expected" ] || { health_motivo "$tx" "sha do bridge.cjs diferente do pacote (tem ${got:0:12}, esperado ${expected:0:12})"; return 1; }
+  got="$(installed_skills_digest "$skills_path" 2>/dev/null)"
+  if [ "$got" != "$expected_skills" ]; then
+    # o veredito e o de sempre; so na reprovacao roda de novo para ler, no stderr, o item fora do padrao
+    if [ -n "$got" ]; then
+      health_motivo "$tx" "catalogo de skills mudou depois do commit (digest ${got:0:12}, esperado ${expected_skills:0:12}): arquivo a mais, a menos ou editado"
+    else
+      health_motivo "$tx" "catalogo de skills fora do padrao: $(installed_skills_digest "$skills_path" 2>&1 >/dev/null | tail -n 1 | tr -d '\r' | cut -c1-240)"
+    fi
+    return 1
+  fi
+  for f in bridge.cjs appserver/adapter.cjs lib/onboarding.js lib-motores/codex-appserver.cjs lib-motores/claude.cjs \
+           lib-motores/index.cjs workers/piper.js; do
+    "$NODE_BIN" --check "$live/$f" >/dev/null 2>&1 || { health_motivo "$tx" "node --check reprovou $f (saida $?, node: ${NODE_BIN:-vazio})"; return 1; }
+  done
   # ANTI-CORRIDA (04/09, tx 20260904T135046Z rolled-back a toa): medir o MainPID
   # enquanto a unit ainda esta em 'activating'/'deactivating' pega o pid do ciclo
   # que esta MORRENDO. Tres linhas depois o systemd entrega o pid novo, pid1!=pid2,
