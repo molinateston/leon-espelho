@@ -1193,7 +1193,7 @@ USAGE
 : "${LEON_CODEX_BUNDLE_FILE:=}"
 : "${LEON_BASE_PACKAGE_FILE:=}"
 : "${LEON_BASE_PACKAGE_HASH_FILE:=}"
-: "${LEON_CODEX_CLI_VERSION:=0.154.0}"
+: "${LEON_CODEX_CLI_VERSION:=0.163.0}"
 : "${LEON_CODEX_CLI_ROOT:=}"
 : "${LEON_CODEX_BIN_RESOLVED:=}"
 : "${LEON_NODE_VERSION:=22.22.0}"
@@ -1442,7 +1442,7 @@ if data["schema"]!=2 or data["kind"]!="leon-codex-release" or data["channel"]!="
 if data["keyFingerprint"]!=fingerprint: raise SystemExit(1)
 version_re=re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
 if not version_re.fullmatch(str(data["version"])) or not version_re.fullmatch(str(data["minVersion"])): raise SystemExit(1)
-if data["codexCliVersion"]!="0.154.0" or data["nodeVersion"]!="22.22.0": raise SystemExit(1)
+if data["codexCliVersion"]!="0.163.0" or data["nodeVersion"]!="22.22.0": raise SystemExit(1)
 artifacts=data["artifacts"]
 if set(artifacts)!={"base","bundle","skills","updater"}: raise SystemExit(1)
 expected={
@@ -1746,13 +1746,13 @@ PY
   case "$arch" in
     x86_64|amd64)
       platform_alias=codex-linux-x64; target_triple=x86_64-unknown-linux-musl
-      platform_sha512=6b8148dc0f2c1adc06aceaa5b6b3dbad2da16a3ac7406e7dd44c2645f891a0b31bd74571741b54196e20bba20955810d898180ee4dcfe239511c4a02654fecf5 ;;
+      platform_sha512=bb045a3acad8a202d085cc4033f1a8796af0d1021610c468edcf6033cb0a02f89591940796ef6444b2793e4b9f6d5f800468f2660230885749d0b089d0de9ef3 ;;
     aarch64|arm64)
       platform_alias=codex-linux-arm64; target_triple=aarch64-unknown-linux-musl
-      platform_sha512=2a64c207a493e3ce3379894fa4a3ff2b93ff8116989ade938a1543fb3a2da1ee8ef6ad094813fe158bc2cf803fcd95d1ef10ce1d44534a31e9d2c0fcc164b461 ;;
+      platform_sha512=207dbf47ee0e6ab8c6bec01fd659777ddc8bc2b3e060b977bb3a7abbd0b20fdb23d8bc3e5620d27b74016551dd70726cd1e22264583a5a9adcbb2e024596941b ;;
     *) echo "ERRO: arquitetura sem pacote Codex homologado: $arch." >&2; return 1 ;;
   esac
-  main_sha512=155ff1d4e1d762ffe27e37f79978fd4e14d301671464de9c18845046147190a34e3ee226bb5596d1cf1ebf5bd4904f57187f747449d81b5b418c8931462920d3
+  main_sha512=1cd77bbd1f684cae8cda2931167bcd0c275852002cca8f555677792a711dd8e37419823efbb3225fd5cd3d4921b5d8062853ec592f82129a50d5453adee56153
   main_url="https://registry.npmjs.org/@openai/codex/-/codex-${LEON_CODEX_CLI_VERSION}.tgz"
   platform_url="https://registry.npmjs.org/@openai/codex/-/codex-${LEON_CODEX_CLI_VERSION}-linux-${platform_alias##*-}.tgz"
   if [ "$LEON_TEST_CODEX_CLI_ONLY" = 1 ] && [ -n "$LEON_TEST_CODEX_MAIN_SHA512" ]; then
@@ -1986,7 +1986,7 @@ try:
   if not name.startswith("package/"): raise ValueError()
   if not (m.isdir() or m.isfile()) or m.islnk() or m.issym() or m.isdev() or m.isfifo(): raise ValueError()
   if m.isfile(): total+=m.size
- if total>(1_048_576 if kind=="main" else 400_000_000): raise ValueError()
+ if total>(1_048_576 if kind=="main" else 520_000_000): raise ValueError()
  pj=tf.extractfile("package/package.json")
  if pj is None: raise ValueError()
  data=json.load(pj)
@@ -3342,7 +3342,7 @@ fi
   # piso de quem roda o Codex fora da ponte. "high" cravado aqui era raciocínio invisível
   # cobrado em todo turno, e é o que estourava a cota do dono no plano Plus.
 cat > "$CONFIG_CANDIDATE" <<EOF
-model = "gpt-5.6-sol"
+model = "gpt-6.1-sol"
 model_reasoning_effort = "medium"
 preferred_auth_method = "chatgpt"
 sandbox_mode = "danger-full-access"
@@ -3963,7 +3963,7 @@ ENGINE_DEFAULT=codex
 LEON_CODEX_ONLY=1
 CODEX_APP_SERVER=1
 CODEX_HOME=$(leon_preserva home-do-motor "${PREV_ENV_SAFE:-$ENV_OBRA/nao-existe}" codex "$LEON_CODEX_HOME")
-CODEX_MODEL=gpt-5.6-sol
+CODEX_MODEL=gpt-6.1-sol
 CODEX_REASONING_EFFORT=high
 LEON_CODEX_CLI_VERSION=$LEON_CODEX_CLI_VERSION
 LEON_DATA_DIR=$LEON_DATA_DIR
@@ -4201,7 +4201,7 @@ if [ "$MOCK_MODE" != "1" ]; then
     SMOKE_DIR="$LEON_WORK_AREA/.leon-appserver-smoke-$TX_ID"
     if ! CODEX_HOME="$LEON_CODEX_HOME_MOTOR" \
         LEON_CODEX_HOME="$LEON_CODEX_HOME_MOTOR" \
-        CODEX_MODEL="gpt-5.6-sol" \
+        CODEX_MODEL="gpt-6.1-sol" \
         LEON_RUNTIME_DIR="$INSTALL_DIR" \
         LEON_SMOKE_DIR="$SMOKE_DIR" \
         "$NODE_BIN" "$INSTALL_DIR/smoke/appserver-smoke.cjs" >"$SMOKE_OUT" 2>&1; then

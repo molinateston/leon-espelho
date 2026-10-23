@@ -8,33 +8,33 @@
       "url": "/download-codex"
     },
     "bundle": {
-      "bytes": 408869,
+      "bytes": 408917,
       "file": "leon-codex-appserver-v2.tar.gz",
       "licensed": false,
-      "sha256": "d5eca67187e1f4e86f354f10425e6f037ec7f2a72e4a556be9659d9eacf7c4b6",
+      "sha256": "2495dcd6f9f4f7fbde80e17712ea1e45068c8676d92312cf52fd2fc278874b34",
       "url": "/leon-codex-appserver-v2.tar.gz"
     },
     "skills": {
-      "bytes": 15695955,
+      "bytes": 18700217,
       "file": "leon-skills-codex-minimal.tar.gz",
       "licensed": false,
-      "sha256": "a2451c9be87bfbd8c00795aa5f6385faf6c6db5c688a5f634899bf2d0e9f1ef5",
+      "sha256": "234e3af5434ed323ca81a7ca05559714eb0fef1f319b54ecc3acfd7080064cbf",
       "url": "/leon-skills-codex-minimal.tar.gz"
     },
     "updater": {
-      "bytes": 277178,
+      "bytes": 278647,
       "file": "update-pago-codex.sh",
       "licensed": false,
-      "sha256": "41dc602d816bb3b5eabdd7742d3163af9706d22f68036c6213c4abe3268f902f",
+      "sha256": "9e68c158ab2261e3d4e3dbb73967fcf189d61ce9e9c9c2bb18bdd7b70c959898",
       "url": "/update-pago-codex.sh"
     }
   },
   "channel": "stable",
-  "codexCliVersion": "0.154.0",
+  "codexCliVersion": "0.163.0",
   "keyFingerprint": "eb70521f5e4dd9bb1cd11e6ceb0b2bddd65596558322908a2d04fd3dec5cbe08",
   "kind": "leon-codex-release",
   "minVersion": "2.0.0",
   "nodeVersion": "22.22.0",
   "schema": 2,
-  "version": "2.7.13"
+  "version": "2.7.14"
 }

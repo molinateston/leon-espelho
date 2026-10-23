@@ -1192,9 +1192,9 @@ say "   casa: $INSTALL_DIR (o LEON atual segue no ar o tempo todo)"
 # da casa (que aqui sempre existe), pelo leitor do bridge; o ambiente nao vale pra elas.
 leon_bases_do_dono "$ENV_FILE" || { echo "ERRO: nao consegui ler as pastas do .env desta casa." >&2; exit 1; }
 LEON_CODEX_HOME="$LEON_DATA_DIR/codex"
-CODEX_MODEL="${CODEX_MODEL:-gpt-5.6-sol}"
+CODEX_MODEL="${CODEX_MODEL:-gpt-6.1-sol}"
 : "${LEON_NODE_VERSION:=22.22.0}"
-: "${LEON_CODEX_CLI_VERSION:=0.154.0}"
+: "${LEON_CODEX_CLI_VERSION:=0.163.0}"
 : "${LEON_NODE_ROOT:=}"
 : "${LEON_CODEX_CLI_ROOT:=}"
 : "${LEON_NODE_BIN_RESOLVED:=}"
@@ -1246,7 +1246,7 @@ declare -F ensure_node_runtime ensure_codex_cli codex_login_unificado provar_mod
 say "   funcoes de runtime/login carregadas da fonte provada."
 
 # ------------------------------------------------------------
-# SEC3 · Runtime dedicado do Codex (Node 22.22.0 + Codex CLI 0.154.0 pinados).
+# SEC3 · Runtime dedicado do Codex (Node 22.22.0 + Codex CLI 0.163.0 pinados).
 #   Idempotente: revalida sem rebaixar. NAO derruba o LEON claude (so instala arquivos).
 # ------------------------------------------------------------
 say ">> preparando runtime dedicado do Codex (Node $LEON_NODE_VERSION + Codex CLI $LEON_CODEX_CLI_VERSION)..."
@@ -1611,13 +1611,13 @@ fi
 # PERSONA_DIR_LOCAL vale pros DOIS motores (o bridge le a persona/nucleo dela em ambos): a mesma
 # PERSONA_DIR do leitor unico.
 PERSONA_DIR_LOCAL="$PERSONA_DIR"
-CODEX_MODEL="${CODEX_MODEL:-gpt-5.6-sol}"
+CODEX_MODEL="${CODEX_MODEL:-gpt-6.1-sol}"
 LEON_RELEASE_TRUST_FINGERPRINT='eb70521f5e4dd9bb1cd11e6ceb0b2bddd65596558322908a2d04fd3dec5cbe08'
 
 # Versoes homologadas do runtime dedicado do Codex: as mesmas que o
 # release-manifest declara e que o update-pago-codex.sh valida.
 : "${LEON_NODE_VERSION:=22.22.0}"
-: "${LEON_CODEX_CLI_VERSION:=0.154.0}"
+: "${LEON_CODEX_CLI_VERSION:=0.163.0}"
 : "${LEON_CLAUDE_CLI_MINIMA:=2.1.280}"   # 23/09: minimo do Claude Code (claude-opus-5 exige 2.1.280+)
 : "${LEON_NODE_ROOT:=}"
 : "${LEON_CODEX_CLI_ROOT:=}"
@@ -2188,13 +2188,13 @@ PY
   case "$arch" in
     x86_64|amd64)
       platform_alias=codex-linux-x64; target_triple=x86_64-unknown-linux-musl
-      platform_sha512=6b8148dc0f2c1adc06aceaa5b6b3dbad2da16a3ac7406e7dd44c2645f891a0b31bd74571741b54196e20bba20955810d898180ee4dcfe239511c4a02654fecf5 ;;
+      platform_sha512=bb045a3acad8a202d085cc4033f1a8796af0d1021610c468edcf6033cb0a02f89591940796ef6444b2793e4b9f6d5f800468f2660230885749d0b089d0de9ef3 ;;
     aarch64|arm64)
       platform_alias=codex-linux-arm64; target_triple=aarch64-unknown-linux-musl
-      platform_sha512=2a64c207a493e3ce3379894fa4a3ff2b93ff8116989ade938a1543fb3a2da1ee8ef6ad094813fe158bc2cf803fcd95d1ef10ce1d44534a31e9d2c0fcc164b461 ;;
+      platform_sha512=207dbf47ee0e6ab8c6bec01fd659777ddc8bc2b3e060b977bb3a7abbd0b20fdb23d8bc3e5620d27b74016551dd70726cd1e22264583a5a9adcbb2e024596941b ;;
     *) echo "ERRO: arquitetura sem pacote Codex homologado: $arch." >&2; return 1 ;;
   esac
-  main_sha512=155ff1d4e1d762ffe27e37f79978fd4e14d301671464de9c18845046147190a34e3ee226bb5596d1cf1ebf5bd4904f57187f747449d81b5b418c8931462920d3
+  main_sha512=1cd77bbd1f684cae8cda2931167bcd0c275852002cca8f555677792a711dd8e37419823efbb3225fd5cd3d4921b5d8062853ec592f82129a50d5453adee56153
   main_url="https://registry.npmjs.org/@openai/codex/-/codex-${LEON_CODEX_CLI_VERSION}.tgz"
   platform_url="https://registry.npmjs.org/@openai/codex/-/codex-${LEON_CODEX_CLI_VERSION}-linux-${platform_alias##*-}.tgz"
   if [ "$LEON_TEST_CODEX_CLI_ONLY" = 1 ] && [ -n "$LEON_TEST_CODEX_MAIN_SHA512" ]; then
@@ -2280,7 +2280,7 @@ try:
   if not name.startswith("package/"): raise ValueError()
   if not (m.isdir() or m.isfile()) or m.islnk() or m.issym() or m.isdev() or m.isfifo(): raise ValueError()
   if m.isfile(): total+=m.size
- if total>(1_048_576 if kind=="main" else 400_000_000): raise ValueError()
+ if total>(1_048_576 if kind=="main" else 520_000_000): raise ValueError()
  pj=tf.extractfile("package/package.json")
  if pj is None: raise ValueError()
  data=json.load(pj)
@@ -3027,14 +3027,14 @@ EOF
   como_leon env LEON_DADOS="$LEON_DATA_DIR" bash -s <<'PIPER_SETUP' || { echo "ERRO: a voz local (Piper TTS) nao instalou. suporte: https://wa.me/5511988890934" >&2; exit 1; }
 set -e
 mkdir -p "$LEON_DADOS"/piper-venv "$LEON_DADOS"/voices/piper
-if [ ! -x "$LEON_DADOS"/piper-venv/bin/piper ]; then
-  python3 -m venv "$LEON_DADOS"/piper-venv
+if [ ! -x "$LEON_DADOS"/piper-venv/bin/piper ] || ! "$LEON_DADOS"/piper-venv/bin/piper --help >/dev/null 2>&1; then   # 20/10: venv quebrado por upgrade de Ubuntu e refeito
+  python3 -m venv --clear "$LEON_DADOS"/piper-venv
   "$LEON_DADOS"/piper-venv/bin/pip install --quiet piper-tts >/dev/null
 fi
 "$LEON_DADOS"/piper-venv/bin/pip install --quiet --upgrade piper-tts >/dev/null 2>&1 || true   # 02/10 (dono): sempre a versao mais nova
 for f in pt_BR-faber-medium.onnx pt_BR-faber-medium.onnx.json; do
   if [ ! -s "$LEON_DADOS"/voices/piper/$f ]; then
-    curl -sfL -o "$LEON_DADOS"/voices/piper/$f.part "https://huggingface.co/rhasspy/piper-voices/resolve/main/pt/pt_BR/faber/medium/$f"
+    curl -sfL --retry 4 --retry-delay 3 --retry-all-errors --connect-timeout 20 -o "$LEON_DADOS"/voices/piper/$f.part "https://huggingface.co/rhasspy/piper-voices/resolve/main/pt/pt_BR/faber/medium/$f"
     mv -f "$LEON_DADOS"/voices/piper/$f.part "$LEON_DADOS"/voices/piper/$f
   fi
 done
@@ -3044,8 +3044,8 @@ PIPER_SETUP
   como_leon env LEON_DADOS="$LEON_DATA_DIR" bash -s <<'EDGE_SETUP' || { echo "ERRO: a voz nuvem (Edge TTS) nao instalou. suporte: https://wa.me/5511988890934" >&2; exit 1; }
 set -e
 mkdir -p "$LEON_DADOS"/edgetts-venv
-if [ ! -x "$LEON_DADOS"/edgetts-venv/bin/edge-tts ]; then
-  python3 -m venv "$LEON_DADOS"/edgetts-venv
+if [ ! -x "$LEON_DADOS"/edgetts-venv/bin/edge-tts ] || ! "$LEON_DADOS"/edgetts-venv/bin/python3 -c "import edge_tts" 2>/dev/null; then   # 20/10: idem
+  python3 -m venv --clear "$LEON_DADOS"/edgetts-venv
   "$LEON_DADOS"/edgetts-venv/bin/pip install --quiet edge-tts >/dev/null
 fi
 "$LEON_DADOS"/edgetts-venv/bin/pip install --quiet --upgrade edge-tts >/dev/null 2>&1 || true   # 02/10 (dono): sempre a versao mais nova
@@ -3058,9 +3058,9 @@ mkdir -p "$LEON_DADOS"/whisper-venv
 if [ ! -x "$LEON_DADOS"/whisper-venv/bin/python3 ] || ! "$LEON_DADOS"/whisper-venv/bin/python3 -c "import faster_whisper" 2>/dev/null; then
   python3 -m venv "$LEON_DADOS"/whisper-venv
   "$LEON_DADOS"/whisper-venv/bin/pip install --quiet --upgrade pip >/dev/null
-  "$LEON_DADOS"/whisper-venv/bin/pip install --quiet faster-whisper >/dev/null
+  "$LEON_DADOS"/whisper-venv/bin/pip install --quiet faster-whisper "av<17" >/dev/null   # 20/10 (GAIA, Ubuntu 26.04): o av 19 tirou o metadata_errors que o faster-whisper 1.2.1 ainda manda; a transcricao dava erro
 fi
-"$LEON_DADOS"/whisper-venv/bin/pip install --quiet --upgrade faster-whisper >/dev/null 2>&1 || true   # 02/10 (dono): a transcricao nao pode ficar desatualizada
+"$LEON_DADOS"/whisper-venv/bin/pip install --quiet --upgrade faster-whisper "av<17" >/dev/null 2>&1 || true   # 02/10 (dono): a transcricao nao pode ficar desatualizada
 # 25/08 (lei do dono: "transcricao TEM que ser nativa"): o modelo baixa AGORA, na
 # instalacao — nao no primeiro audio do cliente. Sem isto, o primeiro audio dele
 # virava "roda /audio e espera uns minutos": vergonha na frente de cliente novo.
@@ -3071,6 +3071,16 @@ from faster_whisper import WhisperModel
 WhisperModel("small", device="cpu", compute_type="int8")
 print("   modelo de audio pronto (transcricao nativa de fabrica)")
 PYMODEL
+# 20/10 (GAIA): carregar o modelo nao prova que a transcricao funciona (o av 19 passava aqui e quebrava no 1o audio).
+# Decodifica 1 s de audio de verdade; se falhar, a instalacao para com erro claro.
+"$LEON_DADOS"/whisper-venv/bin/python3 - <<'PYDECODE'
+import os, tempfile, wave
+from faster_whisper.audio import decode_audio
+p = os.path.join(tempfile.mkdtemp(), "t.wav")
+w = wave.open(p, "wb"); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b"\0\0" * 16000); w.close()
+assert len(decode_audio(p, sampling_rate=16000)) > 0
+print("   decodificacao de audio ok")
+PYDECODE
 WHISPER_SETUP
 
   # O atualizador do Codex le TOML em python; Ubuntu 22.04 tem Python 3.10, sem
@@ -3383,7 +3393,7 @@ if data["schema"]!=2 or data["kind"]!="leon-codex-release" or data["channel"]!="
 if data["keyFingerprint"]!=fingerprint: raise SystemExit(1)
 version_re=re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
 if not version_re.fullmatch(str(data["version"])) or not version_re.fullmatch(str(data["minVersion"])): raise SystemExit(1)
-if data["codexCliVersion"]!="0.154.0" or data["nodeVersion"]!="22.22.0": raise SystemExit(1)
+if data["codexCliVersion"]!="0.163.0" or data["nodeVersion"]!="22.22.0": raise SystemExit(1)
 artifacts=data["artifacts"]
 if set(artifacts)!={"base","bundle","skills","updater"}: raise SystemExit(1)
 expected={

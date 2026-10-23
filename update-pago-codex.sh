@@ -2676,7 +2676,7 @@ rewrite_runtime_env() {
     # Lei do dono (23/09 noite): o padrao do Claude e o Opus, nunca o Sonnet (so entra se faltar a chave).
     codex_model="claude-opus-5-5"
   else
-    codex_model="${CODEX_MODEL_EFETIVO:-gpt-5.6-sol}"
+    codex_model="${CODEX_MODEL_EFETIVO:-gpt-6.1-sol}"
   fi
   # PADROES: o que a casa recebe SO se nao tiver a chave. Mesmo conteudo do antigo bloco
   # gerenciado; a diferenca e que ele nao vence mais o dono.
@@ -2878,7 +2878,7 @@ write_codex_config_candidate() {
   # piso de quem roda o Codex fora da ponte. "high" cravado aqui era raciocínio invisível
   # cobrado em todo turno, e é o que estourava a cota do dono no plano Plus.
   cat > "$destination" <<EOF
-model = "${CODEX_MODEL_EFETIVO:-gpt-5.6-sol}"
+model = "${CODEX_MODEL_EFETIVO:-gpt-6.1-sol}"
 model_reasoning_effort = "medium"
 preferred_auth_method = "chatgpt"
 sandbox_mode = "danger-full-access"
@@ -4460,11 +4460,12 @@ for _peca in NUCLEO-LEON.md _MOTOR-CLAUDE.md _MOTOR-CODEX.md _REGRAS-DURAS.md CA
 done
 # Modelo efetivo desta casa: o que o instalador provou no login (gravado no .env),
 # senao o default. Vale pro config.toml candidato, pro smoke e pro .env regravado.
-CODEX_MODEL_EFETIVO="gpt-5.6-sol"
+CODEX_MODEL_EFETIVO="gpt-6.1-sol"
 if _m="$(safe_env_value "$INSTALL_DIR/.env" CODEX_MODEL 2>/dev/null)" \
   && printf '%s' "$_m" | grep -qE '^[A-Za-z0-9._-]+$'; then
   CODEX_MODEL_EFETIVO="$_m"
 fi
+[ "$CODEX_MODEL_EFETIVO" != "gpt-5.6-sol" ] || CODEX_MODEL_EFETIVO="gpt-6.1-sol"   # 20/10: o padrão antigo (limitado em ritmo e recusado pelo Codex novo) migra uma vez; escolha do dono fica no /modelo, não no .env
 unset _m
 # O config.toml e do CLI do Codex. Numa casa que roda o outro motor ele nao existe e nao
 # faz falta: sem candidato gerado, o commit la embaixo simplesmente nao o aplica (o passo
@@ -4865,8 +4866,24 @@ fi
 # 02/10 (dono): voz e transcricao sempre na versao mais nova (best-effort; so mexe no venv que e do usuario que roda, nunca derruba a atualizacao)
 for _v in whisper-venv:faster-whisper edgetts-venv:edge-tts piper-venv:piper-tts; do
   _pip="$LEON_DATA_DIR/${_v%%:*}/bin/pip"
-  [ -x "$_pip" ] && [ -O "$_pip" ] && { timeout 240 "$_pip" install --quiet --upgrade "${_v##*:}" >/dev/null 2>&1 || true; }
+  _pkg="${_v##*:}"; _lim=""; [ "${_v%%:*}" = whisper-venv ] && _lim="av<17"   # 20/10: o av 19 quebra a transcricao (faster-whisper 1.2.1 manda metadata_errors); sobe o av para o ultimo que ainda serve
+  [ -x "$_pip" ] && [ -O "$_pip" ] && { timeout 240 "$_pip" install --quiet --upgrade "$_pkg" ${_lim:+"$_lim"} >/dev/null 2>&1 || true; }
 done
+
+# 20/10 (GAIA): depois de subir os pacotes de voz, decodifica 1 s de audio de verdade; se falhar, refaz o av e avisa.
+if [ -x "$LEON_DATA_DIR/whisper-venv/bin/python3" ] && [ -O "$LEON_DATA_DIR/whisper-venv/bin/python3" ]; then
+  _dec='import os,tempfile,wave
+from faster_whisper.audio import decode_audio
+p=os.path.join(tempfile.mkdtemp(),"t.wav")
+w=wave.open(p,"wb");w.setnchannels(1);w.setsampwidth(2);w.setframerate(16000);w.writeframes(b"\0\0"*16000);w.close()
+assert len(decode_audio(p,sampling_rate=16000))>0'
+  if ! timeout 60 "$LEON_DATA_DIR/whisper-venv/bin/python3" -c "$_dec" >/dev/null 2>&1; then
+    timeout 240 "$LEON_DATA_DIR/whisper-venv/bin/pip" install --quiet --force-reinstall "av<17" >/dev/null 2>&1 || true
+    timeout 60 "$LEON_DATA_DIR/whisper-venv/bin/python3" -c "$_dec" >/dev/null 2>&1 \
+      && say "   transcricao de audio refeita (o pacote av estava incompativel)." \
+      || say "   aviso: a transcricao de audio desta casa ainda nao decodifica; mande um audio de teste depois da atualizacao."
+  fi
+fi
 
 ENV_RECUSA=""
 rewrite_runtime_env "$STAGE/.env" \
