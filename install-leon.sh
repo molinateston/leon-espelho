@@ -3248,9 +3248,9 @@ if [ "$MOCK_MODE" != "1" ]; then
     provar_modelo_codex || exit 1
     echo ""
   # a pasta de login do Claude que o bridge usa HOJE (homeDoMotor: CLAUDE_CONFIG_DIR do .env, o
-  # ~/.claude com credencial ou <LEON_DATA_DIR>/claude): casa ja logada la nao pede login a mais
-  elif [ ! -f "$HOME/.claude/.credentials.json" ] \
-       && [ ! -f "$(leon_preserva home-do-motor "$INSTALL_DIR/.env" claude "$LEON_DATA_DIR/claude")/.credentials.json" ]; then
+  # ~/.claude com credencial ou <LEON_DATA_DIR>/claude): casa ja logada NA PASTA QUE O .env APONTA nao pede login a mais.
+  # 23/10: nao basta ter ~/.claude logado: a 2.7.13 gravava la e o .env apontava a pasta vazia; reinstalar tem de logar na certa.
+  elif [ ! -f "$(leon_preserva home-do-motor "$INSTALL_DIR/.env" claude "$LEON_DATA_DIR/claude")/.credentials.json" ]; then
     echo ""
     echo "========================================"
     echo "  LOGIN NO CLAUDE (1 unica vez)"
@@ -3259,7 +3259,12 @@ if [ "$MOCK_MODE" != "1" ]; then
     echo "faz login na conta Anthropic, autoriza. Cola o codigo"
     echo "de 6 digitos de volta aqui e enter."
     echo ""
-    claude auth login < /dev/tty || { echo "ERRO: claude auth login falhou." >&2; exit 1; }
+    # 23/10: o login tem de gravar a credencial na MESMA pasta que o .env vai apontar (CLAUDE_CONFIG_DIR). Antes ele gravava
+    # em ~/.claude e, numa instalacao do zero, o .env apontava <LEON_DATA_DIR>/claude (vazia): o agente pedia login de novo.
+    _claude_home="$(leon_preserva home-do-motor "$INSTALL_DIR/.env" claude "$LEON_DATA_DIR/claude")" || { echo "ERRO: nao consegui resolver a pasta do login do Claude." >&2; exit 1; }
+    case "$_claude_home" in /*) ;; *) echo "ERRO: pasta do login do Claude invalida: '$_claude_home'." >&2; exit 1 ;; esac
+    [ -d "$_claude_home" ] || { mkdir -p "$_claude_home" && chmod 700 "$_claude_home"; } || { echo "ERRO: nao consegui criar $_claude_home." >&2; exit 1; }   # pasta que ja existe (do dono) nao muda de modo
+    CLAUDE_CONFIG_DIR="$_claude_home" claude auth login < /dev/tty || { echo "ERRO: claude auth login falhou." >&2; exit 1; }
     echo ""
   fi
 fi

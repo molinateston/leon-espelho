@@ -4842,6 +4842,32 @@ if [ "$CODEX_CLI_ABAIXO_DA_MINIMA" = "1" ] && [ "$TEST_MODE" != "1" -o "${LEON_T
     say "   motivo: $(tail -n 3 "$LEON_DATA_DIR/codex-cli/.upgrade-ultimo.log" 2>/dev/null | tr '\n' ' ' | cut -c1-240)"
   fi
 fi
+# 23/10 (casa Codex que parou com "The 'gpt-6.1-sol' model ..." 400): o modelo novo so vale com o Codex que o aceita (0.160 ou mais).
+# A 2.7.14 trocava o modelo sem olhar a versao: se o `codex update` acima nao subia, a casa ficava com CLI velho e modelo novo e
+# parava de responder. Agora a decisao vem DEPOIS da tentativa de subir o CLI: CLI novo => gpt-6.1-sol; CLI velho => a casa
+# segue (ou volta) ao modelo antigo, que ele aceita; qualquer outro modelo escolhido pelo dono fica como esta.
+# MODELO-COM-CODEX-INICIO
+CODEX_MODEL_TROCA=""
+if [ "$LEON_ENGINE_CASA" = codex ] && printf '%s' "$LEON_CODEX_CLI_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  _modelo_certo="$CODEX_MODEL_EFETIVO"
+  if semver_ge "$LEON_CODEX_CLI_VERSION" "0.160.0"; then
+    [ "$CODEX_MODEL_EFETIVO" != "gpt-5.6-sol" ] || _modelo_certo="gpt-6.1-sol"
+  elif [ "$CODEX_MODEL_EFETIVO" = "gpt-6.1-sol" ]; then
+    _modelo_certo="gpt-5.6-sol"
+  fi
+  # o .env so troca quando o valor dele e um dos dois modelos do produto; escolha do dono (gpt-6-sol, etc.) fica
+  _m="$(safe_env_value "$INSTALL_DIR/.env" CODEX_MODEL 2>/dev/null || true)"
+  case "$_m" in gpt-5.6-sol|gpt-6.1-sol) [ "$_m" = "$_modelo_certo" ] || CODEX_MODEL_TROCA="$_modelo_certo" ;; esac
+  if [ "$_modelo_certo" != "$CODEX_MODEL_EFETIVO" ]; then
+    say "   modelo $CODEX_MODEL_EFETIVO pede o Codex 0.160 ou mais e esta casa roda a $LEON_CODEX_CLI_VERSION: fico no $_modelo_certo."
+    CODEX_MODEL_EFETIVO="$_modelo_certo"
+    for _t in "$TX_DIR/config.molde" "$TX_DIR/config.candidate"; do
+      [ ! -f "$_t" ] || sed -i -E '1,/^[[:space:]]*\[/ s/^model[[:space:]]*=[[:space:]]*"(gpt-5\.6-sol|gpt-6\.1-sol)"/model = "'"$_modelo_certo"'"/' "$_t" 2>/dev/null || true
+    done
+  fi
+  unset _modelo_certo _t _m
+fi
+# MODELO-COM-CODEX-FIM
 # ---- MOTOR CLAUDE: o irmao do passo de cima (23/09) --------------------------
 # Casa Claude, ou casa que tem o CLI do Claude instalado (multimotor): garante a versao minima.
 # Mesmo lugar e mesma regra do Codex: antes de gravar o .env do stage, nada vivo mutado ainda,
@@ -4888,6 +4914,16 @@ fi
 ENV_RECUSA=""
 rewrite_runtime_env "$STAGE/.env" \
   || fatal "o teu .env tem linha que a versão nova recusaria (${ENV_RECUSA:-motivo não registrado}). Não mexi em nada: corrija essa linha e rode /atualiza de novo."
+# MODELO-NO-ENV-INICIO (o .env do dono manda no modelo; a regra de cima so vale se chegar nele)
+if [ -n "$CODEX_MODEL_TROCA" ] && [ -f "$STAGE/.env" ]; then
+  sed -i -E "s/^([[:space:]]*CODEX_MODEL[[:space:]]*=[[:space:]]*)[\"']?(gpt-5\\.6-sol|gpt-6\\.1-sol)[\"']?([[:space:]]*(#.*)?)\$/\\1$CODEX_MODEL_TROCA\\3/" "$STAGE/.env" 2>/dev/null || true
+  if [ "$(safe_env_value "$STAGE/.env" CODEX_MODEL 2>/dev/null || true)" = "$CODEX_MODEL_TROCA" ]; then
+    say "   .env: CODEX_MODEL ficou $CODEX_MODEL_TROCA (o Codex desta casa e a $LEON_CODEX_CLI_VERSION)."
+  else
+    say "   aviso: nao consegui acertar o CODEX_MODEL do .env pra $CODEX_MODEL_TROCA; se o agente nao responder, troque essa linha a mao."
+  fi
+fi
+# MODELO-NO-ENV-FIM
 
 # ---- LEDGER DE SALAS: FAMILIA INSTALADA E PRE-CHECAGENS (17/09) ------------
 # POR QUE EXATAMENTE AQUI: e o ultimo ponto com a casa INTACTA (MUTATION_STARTED

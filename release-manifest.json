@@ -8,10 +8,10 @@
       "url": "/download-codex"
     },
     "bundle": {
-      "bytes": 408917,
+      "bytes": 409008,
       "file": "leon-codex-appserver-v2.tar.gz",
       "licensed": false,
-      "sha256": "2495dcd6f9f4f7fbde80e17712ea1e45068c8676d92312cf52fd2fc278874b34",
+      "sha256": "8a495f1e9199e4fbf725861e53be4f9fd33333b4b1782fa71886b7184fc190c4",
       "url": "/leon-codex-appserver-v2.tar.gz"
     },
     "skills": {
@@ -22,10 +22,10 @@
       "url": "/leon-skills-codex-minimal.tar.gz"
     },
     "updater": {
-      "bytes": 278647,
+      "bytes": 281164,
       "file": "update-pago-codex.sh",
       "licensed": false,
-      "sha256": "9e68c158ab2261e3d4e3dbb73967fcf189d61ce9e9c9c2bb18bdd7b70c959898",
+      "sha256": "d0be97bc077231f042834864f89e800ceac5cdd5af0e0686c2b4e46002c2fb13",
       "url": "/update-pago-codex.sh"
     }
   },
@@ -36,5 +36,5 @@
   "minVersion": "2.0.0",
   "nodeVersion": "22.22.0",
   "schema": 2,
-  "version": "2.7.14"
+  "version": "2.7.15"
 }
