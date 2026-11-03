@@ -8,17 +8,17 @@
       "url": "/download-codex"
     },
     "bundle": {
-      "bytes": 409009,
+      "bytes": 409008,
       "file": "leon-codex-appserver-v2.tar.gz",
       "licensed": false,
-      "sha256": "f72003ff0d7a370518d2354502635d7d4e5d091ea38758299e2e516125fcc8d4",
+      "sha256": "a758808e6f3f5a080c780c1af7508e87549030e7dc5231ba5babc9f311f53319",
       "url": "/leon-codex-appserver-v2.tar.gz"
     },
     "skills": {
-      "bytes": 20284638,
+      "bytes": 20288443,
       "file": "leon-skills-codex-minimal.tar.gz",
       "licensed": false,
-      "sha256": "aed2e8a5efcf6a9c7710e67d738bea9326d4825cbf9c58a25f898c59004ff995",
+      "sha256": "0292dde2e2e22e504bf0aa808c7b104de27ca4731fd509cea4c7a286038a3c45",
       "url": "/leon-skills-codex-minimal.tar.gz"
     },
     "updater": {
@@ -36,5 +36,5 @@
   "minVersion": "2.0.0",
   "nodeVersion": "22.22.0",
   "schema": 2,
-  "version": "2.7.19"
+  "version": "2.7.20"
 }
